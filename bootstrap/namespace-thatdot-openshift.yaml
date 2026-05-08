@@ -11,4 +11,4 @@ metadata:
     argocd.argoproj.io/managed-by: openshift-gitops
   annotations:
     openshift.io/display-name: "thatDot OpenShift"
-    openshift.io/description: "Quine Enterprise + supporting services for the Wells Fargo PoC"
+    openshift.io/description: "Quine Enterprise + supporting services for thatDot's enterprise OpenShift deployment"

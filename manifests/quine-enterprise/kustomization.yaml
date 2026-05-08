@@ -16,3 +16,13 @@ helmCharts:
 # The chart doesn't ship a Route (it's vanilla-K8s, not OpenShift-aware) — we add ours.
 resources:
   - route.yaml
+
+# Strategic-merge patches applied to the chart-rendered resources.
+# - wait-for-cassandra: adds an initContainer to the Deployment that blocks until
+#   `quine-dc1-service:9042` accepts a TCP connection. Handles QE-after-Cassandra
+#   ordering at the pod level (no ArgoCD app-of-apps required).
+patches:
+  - path: patches/wait-for-cassandra.yaml
+    target:
+      kind: Deployment
+      name: quine-enterprise

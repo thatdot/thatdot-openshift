@@ -1,0 +1,45 @@
+# Customizations applied to the OpenShift GitOps Operator's default ArgoCD instance.
+# Applied via `oc patch argocd ... --patch-file <this>` in bootstrap.sh.
+#
+# Two things live here:
+#   1. `kustomizeBuildOptions` — required so kustomize honors `helmCharts:` blocks
+#      (used by manifests/quine-enterprise/kustomization.yaml). Without --enable-helm,
+#      kustomize silently emits nothing for helmCharts and the chart never renders.
+#
+#   2. `resourceHealthChecks` — registers a custom Lua health check for
+#      `CassandraDatacenter` (cass-operator's CR). ArgoCD has no built-in check
+#      for this kind, so without it ArgoCD reports the cassandra Application as
+#      Healthy as soon as the CR is *applied*, regardless of whether Cassandra
+#      is actually serving CQL. The check watches `cassandraOperatorProgress: Ready`
+#      AND the `Ready` condition. This is what makes "wait for Cassandra to actually
+#      be up" something ArgoCD can observe.
+spec:
+  kustomizeBuildOptions: "--enable-helm"
+
+  resourceHealthChecks:
+    - group: cassandra.datastax.com
+      kind: CassandraDatacenter
+      check: |
+        hs = {}
+        if obj.status == nil or obj.status.cassandraOperatorProgress == nil then
+          hs.status = "Progressing"
+          hs.message = "Awaiting status"
+          return hs
+        end
+        if obj.status.cassandraOperatorProgress ~= "Ready" then
+          hs.status = "Progressing"
+          hs.message = "cass-operator progress: " .. obj.status.cassandraOperatorProgress
+          return hs
+        end
+        if obj.status.conditions ~= nil then
+          for _, condition in ipairs(obj.status.conditions) do
+            if condition.type == "Ready" and condition.status == "True" then
+              hs.status = "Healthy"
+              hs.message = "Cassandra datacenter is ready"
+              return hs
+            end
+          end
+        end
+        hs.status = "Progressing"
+        hs.message = "Ready condition not yet True"
+        return hs
