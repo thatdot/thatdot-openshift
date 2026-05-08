@@ -81,6 +81,7 @@ manifests/                   # GitOps-synced by the Application CRs
 - `--force-config` flag on QE so it uses YAML persistor config rather than the recipe's default ephemeral RocksDB.
 - QE OIDC library (`oidc4s`) requires `https://` for the issuer URL — non-negotiable. `service-ca` handles this for in-cluster TLS.
 - OpenShift `restricted-v2` SCC assigns a *random* UID. Helm charts pinning `runAsUser` will be rejected. Strip the field; let SCC pick.
+- **Every namespace ArgoCD syncs into needs the `argocd.argoproj.io/managed-by: openshift-gitops` label.** OpenShift GitOps's default ArgoCD is namespace-scoped by design; the operator watches for this label and provisions the RoleBinding. Without it, sync fails with "forbidden" on every resource. Same idiom on CRC and on Wells Fargo's eventual cluster.
 - Cassandra datacenter name is taken from the CR's `metadata.name` — keep Helm values' `cassandra.localDatacenter` aligned.
 
 ## When you finish a piece of work
