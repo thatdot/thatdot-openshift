@@ -80,15 +80,42 @@ The script is idempotent — re-run it after `crc delete` + `crc start`, since t
 **Goal:** Prove the full deployment loop (GitHub → OpenShift GitOps → manifest sync → Route → browser) works on a known-good workload before introducing any product complexity.
 
 **What's added**
-- OpenShift Project: `thatdot-openshift`
-- OpenShift GitOps Operator subscription (cluster-scoped, via OperatorHub)
-- An ArgoCD `Application` CR pointing at `manifests/step-1/` in this repo
-- `manifests/step-1/`: nginx Deployment + Service + Route
+- `bootstrap/gitops-operator-subscription.yaml`: OperatorGroup + Subscription for OpenShift GitOps. Applied directly with `oc apply` — the seed that bootstraps GitOps itself.
+- `bootstrap/application-step-1.yaml`: ArgoCD `Application` CR. Applied directly with `oc apply` to seed the step-1 sync.
+- `manifests/step-1/`: GitOps-managed content — `Namespace` (`thatdot-openshift`) + nginx Deployment + Service + Route (edge TLS termination).
+
+**Order of operations**
+
+Manifest-driven throughout — no OperatorHub UI clicks, no `oc new-project`. Every piece of cluster state lives as YAML in this repo so the deployment is reproducible from a fresh clone.
+
+1. *(Prereq)* Public GitHub repo exists and you can `git push` to it.
+2. Write `bootstrap/gitops-operator-subscription.yaml` (an `OperatorGroup` for the operator's install namespace + the `Subscription` to the `redhat-operators` catalog channel). Apply it:
+   ```bash
+   oc apply -f bootstrap/gitops-operator-subscription.yaml
+   oc rollout status deploy/openshift-gitops-server -n openshift-gitops --timeout=300s
+   ```
+3. Write `manifests/step-1/` — `namespace.yaml` (creates `thatdot-openshift`), `nginx-deployment.yaml`, `nginx-service.yaml`, `nginx-route.yaml`.
+4. Write `bootstrap/application-step-1.yaml`. Set `spec.source.targetRevision` to **your active branch** (not `main`) during iteration. Set `spec.syncPolicy.syncOptions: [CreateNamespace=true]` as a safety net.
+5. Commit and push the changes from steps 2–4 to your branch.
+6. Apply the Application CR:
+   ```bash
+   oc apply -f bootstrap/application-step-1.yaml
+   ```
+7. Watch the sync: `oc get application -n openshift-gitops -w` (or open the ArgoCD UI). Verify when Synced + Healthy.
+
+The two `bootstrap/` files are *not* themselves GitOps-managed — they're applied directly. Everything else lives under `manifests/step-1/` and is sync-controlled by the Application CR.
+
+**Gotchas to know in advance**
+
+- **Use a non-root nginx image.** Standard `nginx:latest` runs as root and binds port 80; under OpenShift's `restricted-v2` SCC (random UID, no `CAP_NET_BIND_SERVICE`) the pod will crashloop. Use **`nginxinc/nginx-unprivileged:latest`**, which runs as a non-root user and binds port `8080`. The Service `targetPort` should be `8080`, the Route `port.targetPort` should match. Every workload after step 1 hits this same SCC reality — internalize the pattern now.
+- **Track your iteration branch, not `main`.** During step 1 you'll be pushing manifest tweaks repeatedly to refine until ArgoCD reports Healthy. Set `Application.spec.source.targetRevision` to your branch (e.g., `step-1`). When the step-1 PR merges, update `targetRevision` to `main` as part of the merge cleanup. Otherwise every iteration requires a PR merge before ArgoCD picks it up.
+- **Route TLS:** use `edge` termination (`spec.tls.termination: edge`). The cluster's default wildcard cert handles HTTPS browser-side; plain HTTP between the OpenShift router and the nginx pod. No PEM material lands in the repo.
+- **GitOps Operator's ArgoCD has cluster-admin on CRC.** It can sync into any namespace without an explicit RoleBinding. On a real cluster (Wells Fargo's), you'd grant the `openshift-gitops-argocd-application-controller` ServiceAccount permissions to the target namespace explicitly. Note for v2; ignore for v1.
 
 **Verification**
 
 ```bash
-oc get csv -n openshift-operators | grep gitops             # Succeeded
+oc get csv -A | grep gitops                                 # GitOps Operator: Succeeded (any namespace)
 oc get pods -n openshift-gitops                             # argocd-* pods Running
 oc get application -n openshift-gitops                      # Synced + Healthy
 oc get pods -n thatdot-openshift                            # nginx Running

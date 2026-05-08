@@ -10,6 +10,7 @@ The canonical document is **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)
 
 - **This repo is public on GitHub.** Never commit license keys, admin passwords, customer details, internal cluster URLs, or TLS private material. Secrets flow in via env vars at deploy time → `oc create secret`. Manifests reference secrets by name only.
 - **OpenShift-native lane is the deliberate choice.** When recommending tooling or patterns, default to OpenShift-native equivalents (Operators from OperatorHub, Routes, `service-ca`, OpenShift GitOps) rather than upstream patterns from `enterprise-oauth-reference`.
+- **Manifest-driven, not UI-driven.** All cluster state — operator Subscriptions, Namespaces, ArgoCD Applications, RoleBindings, everything — is expressed as YAML in this repo and applied via `oc apply` (for `bootstrap/` items) or GitOps sync (for `manifests/`). The OperatorHub web console is a *discovery* tool only; never install something through clicks without committing the resulting manifest. This is what makes Wells Fargo's eventual deployment reproducible from a clone.
 - **Walking-skeleton order matters.** Don't skip ahead from step N to step N+2. Each step's verification is the gate for the next.
 
 ## Architectural decisions (locked in)
@@ -59,14 +60,15 @@ README.md                    # external-facing entry point
 CLAUDE.md                    # this file
 .gitignore                   # secret-shaped patterns blocked
 .pre-commit-config.yaml      # gitleaks hook
-manifests/
-  step-1/                    # nginx + Route
+bootstrap/                   # Applied directly with `oc apply` (NOT GitOps-synced)
+  gitops-operator-subscription.yaml  # one-time, step-1
+  application-*.yaml                 # ArgoCD Application CR per step; seeds each sync
+manifests/                   # GitOps-synced by the Application CRs
+  step-1/                    # namespace + nginx + Route
   step-2/                    # QE standalone
   step-3/                    # + Cassandra
   step-4/                    # + Keycloak realm
   step-5/                    # + RBAC wiring
-gitops/
-  application-*.yaml         # ArgoCD Application CRs (one per step)
 ```
 
 ## Useful gotchas (from `enterprise-oauth-reference`)
