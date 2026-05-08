@@ -101,6 +101,7 @@ Manifest-driven throughout — no OperatorHub UI clicks, no `oc new-project`. Ev
    ```bash
    oc apply -f bootstrap/application-step-1.yaml
    ```
+   *Tip:* `./scripts/bootstrap.sh` does steps 2 *and* 6 (Subscription apply + ArgoCD wait + every `bootstrap/application-*.yaml`) in one command. Use it for fresh-clone deploys, re-dos from scratch, or after any cluster reset.
 7. Watch the sync: `oc get application -n openshift-gitops -w` (or open the ArgoCD UI). Verify when Synced + Healthy.
 
 The two `bootstrap/` files are *not* themselves GitOps-managed — they're applied directly. Everything else lives under `manifests/step-1/` and is sync-controlled by the Application CR.

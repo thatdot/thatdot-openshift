@@ -41,6 +41,9 @@ oc whoami
 oc console        # opens OpenShift web console
 crc console --credentials   # admin password
 
+# Bootstrap (idempotent — re-run any time)
+./scripts/bootstrap.sh
+
 # Diagnostics
 oc get pods -A | grep -E "thatdot-openshift|gitops|operators"
 oc describe pod -n thatdot-openshift <pod> | grep -E "scc|runAsUser|Status"
