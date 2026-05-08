@@ -1,0 +1,13 @@
+# Pre-commit hooks for this public repo.
+# After cloning, run `pre-commit install` once to register the hooks.
+# Bypass for one commit (rarely needed): SKIP=gitleaks git commit ...
+
+repos:
+  # Secret scanning — primary safety net.
+  # If a commit is blocked, gitleaks prints the file:line and a fingerprint.
+  # If the finding is a false positive, copy the fingerprint into a
+  # `.gitleaksignore` file (one fingerprint per line) and commit again.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
