@@ -265,15 +265,15 @@ oc logs -n thatdot-openshift -l app=quine-enterprise | grep -i "oidc\|claim"  # 
 Cross off as completed.
 
 ### Prerequisites
-- [ ] `crc`, `oc`, `helm`, `git`, `gitleaks`, `pre-commit` installed
-- [ ] Red Hat developer account; pull secret downloaded
-- [ ] OpenShift Local started (`crc start`); `oc whoami` returns `kubeadmin`
-- [ ] GitHub repo created (public)
-- [ ] `.gitignore` + pre-commit gitleaks hook in place before first push
-- [ ] `QE_LICENSE_KEY` available as env var when needed
+- [x] `crc`, `oc`, `helm`, `git`, `gitleaks`, `pre-commit` installed
+- [x] Red Hat developer account; pull secret downloaded
+- [x] OpenShift Local started (`crc start`); `oc whoami` returns `kubeadmin`
+- [x] GitHub repo created (public)
+- [x] `.gitignore` + pre-commit gitleaks hook in place before first push
+- [x] `QE_LICENSE_KEY` available as env var when needed
 
 ### Implementation
-- [ ] **Step 1** — nginx via GitOps Operator + Route
+- [x] **Step 1** — nginx via GitOps Operator + Route
 - [ ] **Step 2** — Quine Enterprise standalone (RocksDB, no RBAC)
 - [ ] **Step 3** — Cassandra added; QE persistor switched
 - [ ] **Step 4** — Keycloak deployed with `quine-enterprise` realm
