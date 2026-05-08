@@ -250,7 +250,7 @@ The OpenShift-native path is the [k8ssandra `cass-operator`](https://k8ssandra.i
   - `cassandra.enabled: true`
   - `cassandra.endpoints: quine-dc1-service:9042` — the operator-created CQL service (named `<clusterName>-<dcName>-service`)
   - `cassandra.localDatacenter: dc1` — must match the CR's `metadata.name`
-  - `cassandra.plaintextAuth.enabled: true` with `passwordExistingSecret.name: quine-superuser`, `passwordExistingSecret.key: password`. The Secret is auto-created by cass-operator on cluster bootstrap (`<clusterName>-superuser`, with keys `username` + `password`).
+  - `cassandra.plaintextAuth.enabled: false` — matches Cassandra's actual `AllowAllAuthenticator` default (cass-operator creates the `<clusterName>-superuser` Secret defensively, but doesn't enable auth unless you explicitly set `cassandra-yaml.authenticator: PasswordAuthenticator` on the CR). V1 scope: no Cassandra auth.
 - *(new)* `manifests/quine-enterprise/patches/wait-for-cassandra.yaml` — Kustomize strategic-merge patch adding an `initContainer` to the QE Deployment that blocks until `quine-dc1-service:9042` accepts a TCP connection. Uses `registry.access.redhat.com/ubi9/ubi-minimal` and the `bash /dev/tcp/...` idiom (no extra tools needed).
 - *(modified)* `manifests/quine-enterprise/kustomization.yaml` — adds the `patches:` block referencing the new file.
 - *(modified during iteration only — flipped back in finale)* `bootstrap/application-quine-enterprise.yaml`: `targetRevision: main → step-3-cassandra` so QE values changes sync immediately.
@@ -285,7 +285,7 @@ Step 3 is purely additive — no step-2 cleanup needed.
 - **OwnNamespace install for cass-operator** (not AllNamespaces). AllNamespaces would force the operator into `openshift-operators` (cluster-scoped), which conflicts with our namespace-scoped GitOps. OwnNamespace puts the operator in `thatdot-openshift` with an OperatorGroup targeting that same namespace.
 - **SCC violation on Cassandra pods is guaranteed, not optional.** cass-operator (v1.23.x) sets `pod.securityContext` to UID/GID/fsGroup 999 — the standard `cassandra` user — and `restricted-v2` (the default OpenShift SCC) requires a random UID in `1000680000–1000689999` and rejects fixed values. Without an `anyuid` grant somewhere, the StatefulSet spams `FailedCreate` events: `pods "..." is forbidden: unable to validate against any security context constraint`.
 - **`spec.serviceAccount` on `CassandraDatacenter` is effectively immutable post-creation.** The cass-operator validating webhook (`vcassandradatacenter.kb.io`) rejects updates to that field with `CassandraDatacenter write rejected, attempted to change serviceAccount`. Implication: we can't introduce a dedicated `cassandra-sa` ServiceAccount on an existing CR via GitOps — the apply gets rejected. The pragmatic alternative (and what step 3 ships) is to bind the namespace's `default` ServiceAccount to `anyuid` via a RoleBinding (`manifests/cassandra/serviceaccount.yaml`). cass-operator uses `default` when `spec.serviceAccount` is empty, so the binding takes effect. If you want a dedicated SA in the future, you'd set it in the CR's first apply (before the CR exists on the cluster), or delete-and-recreate the CR. The pod's `runAsNonRoot: true` still prevents actual root, even with anyuid bound.
-- **Plaintext auth credentials are operator-managed.** cass-operator creates the superuser Secret as `<clusterName>-superuser` (so `quine-superuser`) with keys `username` + `password`. QE references it via `passwordExistingSecret.name` + `passwordExistingSecret.key`.
+- **Cass-operator's default is `AllowAllAuthenticator`, not auth-enabled.** Despite the operator auto-creating a `<clusterName>-superuser` Secret on cluster bootstrap, **the cluster does not require auth** until you explicitly set `cassandra-yaml.authenticator: PasswordAuthenticator` on the CR. V1 ships with no auth; QE's `plaintextAuth.enabled: false` matches. If you set QE's `plaintextAuth.enabled: true` against a no-auth Cassandra, you'll see harmless-but-noisy WARN log lines: `did not send an authentication challenge; This is suspicious because the driver expects authentication`. The connection works either way; the mismatch is just log noise.
 - **The `--enable-helm` flag is still needed** — QE still uses Kustomize+Helm, and bootstrap.sh's existing patch on the ArgoCD CR continues to apply.
 
 **Verification**
@@ -318,10 +318,9 @@ oc delete pod -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise
 #   MATCH (n:Test {tag: 'step-3'}) RETURN n
 # Node STILL THERE — this is what step 3 proves.
 
-# Sanity: data lives in Cassandra
-SUPERUSER_PW=$(oc get secret quine-superuser -n thatdot-openshift -o jsonpath='{.data.password}' | base64 -d)
+# Sanity: data lives in Cassandra (v1 uses AllowAllAuthenticator — no creds needed)
 oc exec -n thatdot-openshift quine-dc1-default-sts-0 -c cassandra -- \
-    cqlsh -u quine-superuser -p "$SUPERUSER_PW" -e "DESCRIBE KEYSPACES"
+    cqlsh -e "DESCRIBE KEYSPACES"
 # 'quine' keyspace appears
 ```
 

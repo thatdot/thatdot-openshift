@@ -24,21 +24,18 @@ imagePullSecrets:
 # - endpoints: cass-operator names the CQL service `<clusterName>-<dcName>-service`,
 #              so for clusterName=quine and dcName=dc1, the service is `quine-dc1-service`.
 # - localDatacenter: must match the CassandraDatacenter CR's metadata.name (`dc1`).
-# - plaintextAuth: cass-operator auto-creates `<clusterName>-superuser` Secret
-#                  with `username` + `password` keys. QE references it via
-#                  passwordExistingSecret. The username field is the literal
-#                  username inside the Secret (operator stores it as the cluster's
-#                  superuser handle, conventionally `<clusterName>-superuser`).
+# - plaintextAuth.enabled: false — must match Cassandra's actual auth setting.
+#   cass-operator's CassandraDatacenter ships with `AllowAllAuthenticator` by default
+#   (the auto-created `<clusterName>-superuser` Secret is created defensively but
+#   isn't enforced unless you explicitly set `cassandra-yaml.authenticator:
+#   PasswordAuthenticator` in the CR's config). v1 scope is no Cassandra auth.
+#   Step 4+ may revisit if customer requirements change.
 cassandra:
   enabled: true
   endpoints: quine-dc1-service:9042
   localDatacenter: dc1
   plaintextAuth:
-    enabled: true
-    username: quine-superuser
-    passwordExistingSecret:
-      name: quine-superuser
-      key: password
+    enabled: false
 
 # OIDC disabled — RBAC comes in step 5.
 oidc:
