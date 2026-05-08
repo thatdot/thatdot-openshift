@@ -37,7 +37,7 @@ Walking-skeleton approach. Each step adds *exactly one* unknown so failures have
 ```bash
 # One-time CRC setup
 crc setup
-crc config set memory 16384      # 16 GB minimum for QE + Cassandra + Keycloak
+crc config set memory 18432      # 18 GB recommended (16 GB is the floor — full stack at step 5 is tight under that)
 crc config set cpus 6            # adjust to your machine
 crc config set disk-size 60      # GB
 
