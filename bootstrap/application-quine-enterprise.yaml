@@ -1,15 +1,15 @@
-# ArgoCD Application — seed for step 1's GitOps sync.
+# ArgoCD Application — Quine Enterprise.
 # Applied directly with `oc apply`; not itself GitOps-managed.
 #
 # Iteration knob: `spec.source.targetRevision`.
-#   - During iteration:  `step-1` (the active branch)
-#   - When PR merges:    flip to `main` as the last commit on the PR,
+#   - During iteration:  the active branch (e.g., `step-2-basic-qe`)
+#   - After PR merge:    flip to `main` as the last commit on the PR,
 #                        then re-apply this file from main.
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: step-1
+  name: quine-enterprise
   namespace: openshift-gitops
   finalizers:
     # Cascade-delete synced resources when this Application is deleted.
@@ -18,15 +18,14 @@ spec:
   project: default
   source:
     repoURL: https://github.com/thatdot/thatdot-openshift
-    path: manifests/step-1
-    targetRevision: main
+    path: manifests/quine-enterprise
+    targetRevision: step-2-basic-qe
   destination:
     server: https://kubernetes.default.svc
     namespace: thatdot-openshift
   syncPolicy:
     automated:
-      selfHeal: true   # revert manual `oc edit` changes back to git state
-      prune: true      # delete resources that are removed from git
+      selfHeal: true
+      prune: true
     syncOptions:
-      - CreateNamespace=true   # safety net if namespace.yaml fails to apply
-      - ServerSideApply=true   # use SSA for cleaner field ownership
+      - ServerSideApply=true

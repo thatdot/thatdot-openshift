@@ -1,0 +1,53 @@
+# Quine Enterprise Helm values — step 2: standalone, no persistor, no RBAC.
+# Step 3 will switch the persistor to Cassandra; step 5 will enable OIDC.
+
+# Single instance (chart default is hostCount: 3 for clustered mode).
+hostCount: 1
+
+# License key from `qe-license` Secret created by scripts/create-license-secret.sh
+licenseKeySecret:
+  name: qe-license
+
+# Private registry image. Moving tag (`main`) MUST pair with pullPolicy: Always
+# so the kubelet doesn't serve stale cached images on pod restart.
+image:
+  repository: registry.license-server.dev.thatdot.com/thatdot/quine-enterprise
+  tag: main
+  pullPolicy: Always
+
+# Pull credentials for the private registry. Secret created out-of-band by
+# scripts/create-thatdot-registry-pull-secret.sh from $THATDOT_REGISTRY_* env vars.
+imagePullSecrets:
+  - name: thatdot-registry-creds
+
+# Persistor disabled — no Cassandra in step 2.
+# Per chart guidance: "If enabled is set to false, no persistor will be used.
+# Such a configuration can be used for debug and development purposes."
+# Result: in-memory state; pod restart wipes data. Step 3 introduces Cassandra.
+cassandra:
+  enabled: false
+
+# OIDC disabled — RBAC comes in step 5.
+oidc:
+  enabled: false
+
+# ClusterIP exposed via OpenShift Route (not LoadBalancer — that's a
+# Docker-Desktop pattern, not how OpenShift ingress works).
+service:
+  type: ClusterIP
+  port: 8080   # matches webserver.port (chart's container port)
+
+# Resources sized for CRC. Per chart guidance: avoid CPU limits, or set 2x request.
+resources:
+  requests:
+    cpu: 100m
+    memory: 2Gi
+  limits:
+    memory: 4Gi
+    # No CPU limit — CFS throttling on JVM is usually counterproductive.
+
+# JVM args. -Xmx2g caps heap inside the 4Gi pod limit.
+extraJdkArgs: >-
+  -Xmx2g
+  -Dquine.default-api-version=v2
+  -Dquine.license-server-uri=https://license-server.dev.thatdot.com

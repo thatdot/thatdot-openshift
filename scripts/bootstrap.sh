@@ -59,6 +59,31 @@ if [[ $ELAPSED -ge $TIMEOUT ]]; then
 fi
 echo ""
 
+# ---- Configure ArgoCD: enable Kustomize+Helm rendering ----
+# Required because manifests/<step>/kustomization.yaml uses helmCharts:
+# generators. Without --enable-helm, kustomize ignores those blocks silently.
+echo "==> Enabling Kustomize+Helm rendering on the ArgoCD instance..."
+oc patch argocd openshift-gitops -n openshift-gitops --type merge \
+    -p '{"spec":{"kustomizeBuildOptions":"--enable-helm"}}'
+echo ""
+
+# ---- Apply shared cluster resources (namespaces, etc.) ----
+# These live in bootstrap/ rather than under any one step's manifests/ because
+# they're shared infrastructure across every step. Applied directly via `oc apply`,
+# never managed by ArgoCD's prune logic.
+echo "==> Applying shared cluster resources..."
+applied_core=0
+for resource in "$PROJECT_DIR"/bootstrap/namespace-*.yaml; do
+    [[ -f "$resource" ]] || continue
+    echo "    + $(basename "$resource")"
+    oc apply -f "$resource"
+    applied_core=$((applied_core + 1))
+done
+if [[ $applied_core -eq 0 ]]; then
+    echo "    (no namespace-*.yaml files in bootstrap/ — nothing to apply)"
+fi
+echo ""
+
 # ---- Apply every Application CR ----
 echo "==> Applying Application CRs..."
 applied=0
@@ -78,6 +103,11 @@ echo ""
 
 # ---- Done ----
 echo "Done. ArgoCD is bootstrapped; Application(s) seeded."
+echo ""
+echo "If pods stay in ImagePullBackOff or sync errors with 'forbidden', the most"
+echo "common cause is missing Secrets in the target namespace. Run as needed:"
+echo "  ./scripts/create-license-secret.sh"
+echo "  ./scripts/create-thatdot-registry-pull-secret.sh"
 echo ""
 echo "Watch sync progress:"
 echo "  oc get application -n openshift-gitops -w"
