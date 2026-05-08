@@ -1,0 +1,35 @@
+# Init container patch: blocks the QE pod from starting until Cassandra is
+# reachable on its CQL port. Applied to the Helm-rendered QE Deployment via
+# Kustomize's `patches:` mechanism (see ../kustomization.yaml).
+#
+# Why an init container instead of ArgoCD sync waves:
+# - Pod-level concern handled at pod level (idiomatic K8s)
+# - No app-of-apps restructuring required
+# - Resilient to subsequent restarts: every pod start blocks until Cassandra
+#   is reachable, so a Cassandra outage doesn't cause QE to crashloop on
+#   connection-refused
+#
+# Implementation notes:
+# - UBI minimal includes bash + coreutils (timeout, sleep), nothing else needed
+# - The bash `</dev/tcp/HOST/PORT` idiom does a TCP connect without nc or curl
+# - `timeout 2` caps each connect attempt; `sleep 5` between attempts
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quine-enterprise
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: wait-for-cassandra
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Waiting for Cassandra at quine-dc1-service:9042..."
+              until timeout 2 bash -c '</dev/tcp/quine-dc1-service/9042' 2>/dev/null; do
+                sleep 5
+              done
+              echo "Cassandra is reachable. Starting Quine Enterprise."

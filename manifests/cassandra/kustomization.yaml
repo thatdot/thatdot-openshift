@@ -1,0 +1,8 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# No Helm chart — cass-operator handles Cassandra cluster lifecycle from the CR.
+# This Kustomize root just registers the resources we want ArgoCD to apply.
+resources:
+  - cassandradatacenter.yaml

@@ -82,12 +82,13 @@ if [[ $ELAPSED -ge $TIMEOUT ]]; then
 fi
 echo ""
 
-# ---- Configure ArgoCD: enable Kustomize+Helm rendering ----
-# Required because manifests/<step>/kustomization.yaml uses helmCharts:
-# generators. Without --enable-helm, kustomize ignores those blocks silently.
-echo "==> Enabling Kustomize+Helm rendering on the ArgoCD instance..."
+# ---- Configure ArgoCD: kustomize+helm + custom resource health checks ----
+# bootstrap/argocd-customizations.yaml carries:
+#   - kustomizeBuildOptions: --enable-helm  (so kustomize honors helmCharts: blocks)
+#   - resourceHealthChecks for CRDs ArgoCD doesn't know about natively (CassandraDatacenter)
+echo "==> Patching ArgoCD instance with customizations (Kustomize+Helm, custom health checks)..."
 oc patch argocd openshift-gitops -n openshift-gitops --type merge \
-    -p '{"spec":{"kustomizeBuildOptions":"--enable-helm"}}'
+    --patch-file "$PROJECT_DIR/bootstrap/argocd-customizations.yaml"
 echo ""
 
 # ---- Apply shared cluster resources (namespaces, etc.) ----
@@ -113,6 +114,24 @@ echo ""
 echo "==> Creating namespace-scoped secrets..."
 "$SCRIPT_DIR/create-license-secret.sh"
 "$SCRIPT_DIR/create-thatdot-registry-pull-secret.sh"
+echo ""
+
+# ---- Apply other operator subscriptions (cass-operator, future others) ----
+# The OpenShift GitOps Operator subscription is applied earlier (special — it's
+# the bootstrap of GitOps itself). Other operators install via the same
+# Subscription idiom but only after their target namespace and OperatorGroup exist.
+echo "==> Applying additional operator subscriptions..."
+applied_subs=0
+for sub in "$PROJECT_DIR"/bootstrap/*-operator-subscription.yaml; do
+    [[ -f "$sub" ]] || continue
+    [[ "$(basename "$sub")" == "gitops-operator-subscription.yaml" ]] && continue
+    echo "    + $(basename "$sub")"
+    oc apply -f "$sub"
+    applied_subs=$((applied_subs + 1))
+done
+if [[ $applied_subs -eq 0 ]]; then
+    echo "    (no additional operator subscriptions in bootstrap/ — nothing to apply)"
+fi
 echo ""
 
 # ---- Apply every Application CR ----

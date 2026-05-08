@@ -1,5 +1,5 @@
-# Quine Enterprise Helm values — step 2: standalone, no persistor, no RBAC.
-# Step 3 will switch the persistor to Cassandra; step 5 will enable OIDC.
+# Quine Enterprise Helm values — step 3: Cassandra-backed persistence, no RBAC.
+# Step 5 will enable OIDC.
 
 # Single instance (chart default is hostCount: 3 for clustered mode).
 hostCount: 1
@@ -20,12 +20,25 @@ image:
 imagePullSecrets:
   - name: thatdot-registry-creds
 
-# Persistor disabled — no Cassandra in step 2.
-# Per chart guidance: "If enabled is set to false, no persistor will be used.
-# Such a configuration can be used for debug and development purposes."
-# Result: in-memory state; pod restart wipes data. Step 3 introduces Cassandra.
+# Cassandra persistor — provisioned by k8ssandra cass-operator (see manifests/cassandra/).
+# - endpoints: cass-operator names the CQL service `<clusterName>-<dcName>-service`,
+#              so for clusterName=quine and dcName=dc1, the service is `quine-dc1-service`.
+# - localDatacenter: must match the CassandraDatacenter CR's metadata.name (`dc1`).
+# - plaintextAuth: cass-operator auto-creates `<clusterName>-superuser` Secret
+#                  with `username` + `password` keys. QE references it via
+#                  passwordExistingSecret. The username field is the literal
+#                  username inside the Secret (operator stores it as the cluster's
+#                  superuser handle, conventionally `<clusterName>-superuser`).
 cassandra:
-  enabled: false
+  enabled: true
+  endpoints: quine-dc1-service:9042
+  localDatacenter: dc1
+  plaintextAuth:
+    enabled: true
+    username: quine-superuser
+    passwordExistingSecret:
+      name: quine-superuser
+      key: password
 
 # OIDC disabled — RBAC comes in step 5.
 oidc:

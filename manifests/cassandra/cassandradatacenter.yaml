@@ -1,0 +1,45 @@
+# Single-node Cassandra cluster, managed by k8ssandra cass-operator.
+#
+# Service names produced by the operator (referenced by QE):
+#   - quine-dc1-service             — CQL clients (port 9042)        ← QE talks to this
+#   - quine-dc1-all-pods-service    — per-pod DNS (StatefulSet governing service)
+#   - quine-seed-service            — seed node discovery
+#
+# Superuser Secret auto-created by the operator: `quine-superuser`
+# (data keys: `username` and `password`).
+#
+# v1 scope: single node, RF 1, no auth tuning, no monitoring. step 3's discovery
+# goal is "QE writes through to a stateful workload"; production hardening is
+# explicitly deferred.
+---
+apiVersion: cassandra.datastax.com/v1beta1
+kind: CassandraDatacenter
+metadata:
+  name: dc1
+  namespace: thatdot-openshift
+spec:
+  clusterName: quine
+  serverType: cassandra
+  serverVersion: "4.1.4"
+  size: 1                           # minimum allowed; v1 is single-node
+
+  # PVC against CRC's default StorageClass. On a real cluster, this would be a
+  # higher-performance class (gp3, io2, etc.) sized to the workload.
+  storageConfig:
+    cassandraDataVolumeClaimSpec:
+      storageClassName: crc-csi-hostpath-provisioner
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 2Gi
+
+  # Cassandra config. Heap pinned so Cassandra doesn't grab ~25% of CRC's RAM
+  # (its default behavior) and OOM under our tighter ceiling.
+  # `jvm-server-options` is the Cassandra 4.x path; `jvm-options` is for 3.x.
+  config:
+    jvm-server-options:
+      initial_heap_size: "512M"
+      max_heap_size: "512M"
+    cassandra-yaml:
+      num_tokens: 16
