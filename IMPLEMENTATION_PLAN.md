@@ -332,7 +332,7 @@ Cross off as completed.
 
 ### Implementation
 - [x] **Step 1** — nginx via GitOps Operator + Route
-- [ ] **Step 2** — Quine Enterprise standalone (RocksDB, no RBAC)
+- [x] **Step 2** — Quine Enterprise standalone (no persistor / in-memory, no RBAC)
 - [ ] **Step 3** — Cassandra added; QE persistor switched
 - [ ] **Step 4** — Keycloak deployed with `quine-enterprise` realm
 - [ ] **Step 5** — QE RBAC wired against Keycloak
