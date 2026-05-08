@@ -55,6 +55,16 @@ crc console --credentials
 oc whoami    # should return kubeadmin
 ```
 
+### Trust the CRC ingress CA (optional, removes browser warnings)
+
+CRC ships with a self-signed cluster CA. Browsers don't trust it, so the OpenShift web console and every Route you create will show a security warning. The included script extracts the cluster's current ingress CA and adds it to the macOS System keychain (Chrome + Safari).
+
+```bash
+./scripts/trust-crc-ca.sh
+```
+
+The script is idempotent — re-run it after `crc delete` + `crc start`, since the cluster regenerates its CA on each fresh deploy. Prior `ingress-operator@*` certs are removed before the new one is added. Firefox uses its own trust store — see the script's output for the manual import path.
+
 ### Repo safety nets (do this before the first commit)
 
 - `.gitignore` excluding `.env`, `.env.*`, `*.key`, `*.pem`, `*.p12`, `*.jks`, `secrets/`, `*-license-secret.yaml`, `kubeconfig`
