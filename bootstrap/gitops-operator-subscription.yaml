@@ -1,0 +1,30 @@
+# OpenShift GitOps Operator install — applied directly with `oc apply`.
+# This is the seed that bootstraps GitOps itself; nothing else in the repo
+# can be GitOps-managed until this is in place.
+#
+# After applying, wait for ArgoCD with:
+#   oc rollout status deploy/openshift-gitops-server -n openshift-gitops --timeout=300s
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-gitops-operator
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-gitops-operator
+  namespace: openshift-gitops-operator
+spec: {}  # empty spec → AllNamespaces watch mode (cluster-wide)
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: openshift-gitops-operator
+  namespace: openshift-gitops-operator
+spec:
+  channel: latest
+  installPlanApproval: Automatic
+  name: openshift-gitops-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
