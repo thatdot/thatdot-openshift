@@ -1,0 +1,19 @@
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: quine-enterprise
+  namespace: thatdot-openshift
+  labels:
+    app.kubernetes.io/name: quine-enterprise
+spec:
+  to:
+    kind: Service
+    name: quine-enterprise   # matches the chart's fullname (releaseName=quine-enterprise)
+    weight: 100
+  port:
+    targetPort: http         # named port on the chart's Service (port 8080 in our values)
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None

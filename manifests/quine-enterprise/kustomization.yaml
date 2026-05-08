@@ -1,0 +1,18 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Pull the QE chart from helm.thatdot.com and render with our values.
+# Requires `--enable-helm` on the ArgoCD instance (set in scripts/bootstrap.sh).
+helmCharts:
+  - name: quine-enterprise
+    repo: https://helm.thatdot.com
+    version: 0.5.3
+    releaseName: quine-enterprise
+    namespace: thatdot-openshift
+    valuesFile: values.yaml
+
+# Plain YAML resources merged with the chart's output.
+# The chart doesn't ship a Route (it's vanilla-K8s, not OpenShift-aware) — we add ours.
+resources:
+  - route.yaml

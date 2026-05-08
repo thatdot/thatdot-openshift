@@ -133,40 +133,98 @@ open "https://$ROUTE"                                       # browser confirmati
 
 ---
 
-### Step 2 — Quine Enterprise alone (default RocksDB, no RBAC)
+### Step 2 — Quine Enterprise alone (no Cassandra, no RBAC)
 
-**Goal:** QE running on OpenShift with no external dependencies. Isolates QE-specific issues (image, SCC compatibility, JVM args) from data and auth concerns.
+**Goal:** QE running on OpenShift with no external dependencies. Validates the QE image runs under `restricted-v2` SCC, the private-registry pull-secret pattern works, the Kustomize+Helm rendering pattern works under OpenShift GitOps, and Route + edge TLS work for an actual product UI.
 
-**Pre-step (out-of-band, no commit)**
+**Naming convention introduced:** files and directories use semantic names, not step numbers. `application-quine-enterprise.yaml`, `manifests/quine-enterprise/`. Step numbers live in branch names and the IMPLEMENTATION_PLAN, never in repo paths.
 
-```bash
-oc create secret generic qe-license \
-  --from-literal=license-key="$QE_LICENSE_KEY" \
-  -n thatdot-openshift
-```
+**Architectural refactor: namespace becomes shared infrastructure.** Step 1 put `namespace.yaml` inside `manifests/step-1/` — that becomes a problem when removing step 1, since pruning step-1 would also delete the namespace. Going forward, namespaces live in `bootstrap/namespace-*.yaml`, applied directly by `bootstrap.sh`, never owned by an Application's prune logic.
 
 **What's added**
-- `manifests/step-2/`: QE Helm overlay or Kustomize with:
-  - Default in-memory / RocksDB persistor (no Cassandra config yet)
-  - No OIDC config (`-Dquine.oidc.enabled=false` or omitted)
-  - Resource: `2Gi` request / `4Gi` limit; `-Xmx2g` to cap JVM heap
-  - License key sourced from `qe-license` Secret
-  - Route exposing QE UI
+- `bootstrap/namespace-thatdot-openshift.yaml` — refactored from `manifests/step-1/namespace.yaml`. Carries the `argocd.argoproj.io/managed-by` label.
+- `bootstrap/application-quine-enterprise.yaml` — ArgoCD Application; single-source pointing at `manifests/quine-enterprise/`.
+- `manifests/quine-enterprise/`:
+  - `kustomization.yaml` — Kustomize root using `helmCharts:` to pull QE chart 0.5.3 from `helm.thatdot.com`, plus `resources: [route.yaml]` for the OpenShift Route.
+  - `values.yaml` — QE Helm values: image from private registry (`registry.license-server.dev.thatdot.com/thatdot/quine-enterprise:main`, `pullPolicy: Always`), `cassandra.enabled: false`, `oidc.enabled: false`, `imagePullSecrets: [{name: thatdot-registry-creds}]`, single host, resource limits.
+  - `route.yaml` — edge-TLS Route exposing QE on the Service's named port.
+- `scripts/create-license-secret.sh` — idempotent; creates `qe-license` Secret from `$QE_LICENSE_KEY`.
+- `scripts/create-thatdot-registry-pull-secret.sh` — idempotent; creates `thatdot-registry-creds` from `$THATDOT_REGISTRY_USERNAME` + `$THATDOT_REGISTRY_PASSWORD`.
+- Updated `scripts/bootstrap.sh` — patches the ArgoCD instance with `kustomizeBuildOptions: --enable-helm` (required for Kustomize's helmCharts generator), applies any `bootstrap/namespace-*.yaml` before Application CRs.
 
-**SCC trap to watch:** OpenShift's `restricted-v2` SCC assigns a *random* UID. If the QE Helm chart pins `runAsUser`, the pod will be rejected. Fix: remove `runAsUser` from the pod spec and let SCC pick.
+**Removed**
+- `manifests/step-1/` directory
+- `bootstrap/application-step-1.yaml`
+
+**Order of operations**
+
+Manifest-driven throughout. nginx and QE coexist briefly during step 2 — the cleanup of step 1 happens at the end, just before the PR merges, to avoid taking the namespace down while QE is still using it.
+
+1. *(Prereq, on `step-2-basic-qe` branch)* Confirm env vars are loaded so `bootstrap.sh` will auto-create the secrets:
+   ```bash
+   echo "$THATDOT_REGISTRY_USERNAME" && echo "${QE_LICENSE_KEY:0:6}..."
+   ```
+2. *(Already done by Claude)* All new files written under `bootstrap/`, `manifests/quine-enterprise/`, `scripts/`, plus updates to `bootstrap.sh`, `IMPLEMENTATION_PLAN.md`, `CLAUDE.md`.
+3. Commit + push to `step-2-basic-qe`. (Don't delete step-1 files yet — that comes after QE is verified.)
+4. Run the bootstrap. It is fully idempotent: applies the `--enable-helm` patch, the new namespace, both secrets (because env vars are set), and `application-quine-enterprise.yaml`. The existing step-1 nginx deployment is unaffected.
+   ```bash
+   ./scripts/bootstrap.sh
+   ```
+5. Watch the sync until QE is `Synced + Healthy`:
+   ```bash
+   oc get application quine-enterprise -n openshift-gitops -w
+   ```
+6. Verify (see Verification below). nginx is still running at its Route; QE is running at its own Route. No conflict.
+7. Cleanup step 1 — *only after QE is verified*. Order matters: strip the instance label first so the namespace survives the Application deletion.
+   ```bash
+   # Detach the namespace from step-1's ownership so the cascade doesn't take it down
+   oc label namespace thatdot-openshift app.kubernetes.io/instance-
+
+   # Delete the step-1 Application; its finalizer cascades to nginx Deployment/Service/Route only
+   oc delete application step-1 -n openshift-gitops
+
+   # Remove the obsolete files from git
+   git rm -rf manifests/step-1
+   git rm bootstrap/application-step-1.yaml
+   git commit -m "step 2: remove obsolete nginx artifacts"
+   git push origin step-2-basic-qe
+   ```
+8. Finale (same shape as step 1): flip `targetRevision: step-2-basic-qe → main` as the last commit on the PR, merge, then `oc apply -f bootstrap/application-quine-enterprise.yaml` from main, branch auto-deletes.
+
+**Gotchas to know in advance**
+
+- **Moving tag + `pullPolicy`.** `image.tag: main` is a moving tag — the registry repoints `:main` to the latest build. Pair it with `image.pullPolicy: Always` so the kubelet re-pulls on every pod restart. Without `Always`, you'll serve a stale image cached on the node from the first pull.
+- **Kustomize+Helm needs `--enable-helm`.** ArgoCD's default Kustomize integration ignores `helmCharts:` blocks unless this flag is passed. `bootstrap.sh` patches the ArgoCD CR to set it. If you ever stand up a separate ArgoCD instance, remember to set the same flag.
+- **Persistor is off → data is ephemeral.** `cassandra.enabled: false` means QE runs without any persistor — in-memory only. Pod restart wipes all state. This is correct and expected for step 2; step 3 introduces Cassandra. Any Cypher round-trip is purely "did the engine boot," not a persistence test.
+- **Pull secret + license secret are namespace-scoped.** Both must exist in `thatdot-openshift` *before* the QE pod tries to start, otherwise you get `ImagePullBackOff` (no pull secret) or `CreateContainerConfigError` (no license secret). The bootstrap script prints a reminder if either is missing.
 
 **Verification**
 
 ```bash
-oc get pods -n thatdot-openshift -l app=quine-enterprise         # Running, Ready 1/1
-oc describe pod -n thatdot-openshift -l app=quine-enterprise | grep -E '(scc|runAsUser)'
-oc logs -n thatdot-openshift -l app=quine-enterprise | grep -i "started\|listening"
-# Browser: hit the QE Route, log in (no RBAC), run:
+# ArgoCD reports the Application healthy
+oc get application quine-enterprise -n openshift-gitops      # Synced + Healthy
+
+# Pod is Running, no SCC violations
+oc get pods -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise
+oc describe pod -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise | grep -E 'scc|runAsUser'
+
+# Pod logs show QE started
+oc logs -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise --tail=50 | grep -iE 'started|listening|license'
+
+# Route serves the QE UI
+ROUTE=$(oc get route quine-enterprise -n thatdot-openshift -o jsonpath='{.spec.host}')
+curl -sk "https://$ROUTE/api/v2/openapi.json" | head -5     # OpenAPI spec is reachable
+open "https://$ROUTE"                                       # browser: QE landing page (no auth required)
+
+# In the browser, run a Cypher query:
 #   CREATE (n:Test {name: 'hello'}) RETURN n
-# Confirm the node is returned. Refresh — node persists in-memory.
+# Returns the node. Refresh — still there (in-memory).
+# Bounce the pod — data is gone (expected; step 3 fixes this with Cassandra).
+oc delete pod -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise
+# Wait for new pod, re-query — node is gone. ✓ correct behavior for step 2.
 ```
 
-**Done when** the QE UI is reachable via Route and a Cypher query round-trips against in-memory state.
+**Done when** the QE UI is reachable via Route, a Cypher round-trip works against in-memory state, and the Application is `Synced + Healthy`. Persistence across pod restart is *not* expected — that's step 3's responsibility.
 
 **README addendum** "Step 2: Quine Enterprise standalone."
 

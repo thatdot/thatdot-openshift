@@ -17,7 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# ---- Preflight ----
+# ---- Preflight: cluster auth ----
 if ! oc whoami >/dev/null 2>&1; then
     echo "ERROR: oc is not authenticated to a cluster."
     echo "  Did you forget: eval \"\$(crc oc-env)\" and 'oc login -u kubeadmin ...'?"
@@ -27,6 +27,29 @@ fi
 
 echo "Logged in as:  $(oc whoami)"
 echo "Cluster:       $(oc whoami --show-server)"
+echo ""
+
+# ---- Preflight: required env vars ----
+# Fail fast if any required env var is missing — collecting them all so the
+# user fixes everything in one round-trip rather than fix-rerun-fix-rerun.
+missing=()
+[[ -z "${QE_LICENSE_KEY:-}" ]] && missing+=("QE_LICENSE_KEY")
+[[ -z "${THATDOT_REGISTRY_USERNAME:-}" ]] && missing+=("THATDOT_REGISTRY_USERNAME")
+[[ -z "${THATDOT_REGISTRY_PASSWORD:-}" ]] && missing+=("THATDOT_REGISTRY_PASSWORD")
+
+if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "ERROR: required environment variable(s) not set:"
+    for var in "${missing[@]}"; do
+        echo "  - $var"
+    done
+    echo ""
+    echo "These are sourced from ~/.zshrc.local. To set them, append:"
+    echo "  export QE_LICENSE_KEY=\"...\""
+    echo "  export THATDOT_REGISTRY_USERNAME=\"...\""
+    echo "  export THATDOT_REGISTRY_PASSWORD=\"...\""
+    echo "Then 'source ~/.zshrc.local' or open a new terminal, and re-run."
+    exit 1
+fi
 echo ""
 
 # ---- Install OpenShift GitOps Operator ----
@@ -57,6 +80,39 @@ if [[ $ELAPSED -ge $TIMEOUT ]]; then
     echo "  Inspect: oc get csv,pods,deploy -A | grep -i gitops"
     exit 1
 fi
+echo ""
+
+# ---- Configure ArgoCD: enable Kustomize+Helm rendering ----
+# Required because manifests/<step>/kustomization.yaml uses helmCharts:
+# generators. Without --enable-helm, kustomize ignores those blocks silently.
+echo "==> Enabling Kustomize+Helm rendering on the ArgoCD instance..."
+oc patch argocd openshift-gitops -n openshift-gitops --type merge \
+    -p '{"spec":{"kustomizeBuildOptions":"--enable-helm"}}'
+echo ""
+
+# ---- Apply shared cluster resources (namespaces, etc.) ----
+# These live in bootstrap/ rather than under any one step's manifests/ because
+# they're shared infrastructure across every step. Applied directly via `oc apply`,
+# never managed by ArgoCD's prune logic.
+echo "==> Applying shared cluster resources..."
+applied_core=0
+for resource in "$PROJECT_DIR"/bootstrap/namespace-*.yaml; do
+    [[ -f "$resource" ]] || continue
+    echo "    + $(basename "$resource")"
+    oc apply -f "$resource"
+    applied_core=$((applied_core + 1))
+done
+if [[ $applied_core -eq 0 ]]; then
+    echo "    (no namespace-*.yaml files in bootstrap/ — nothing to apply)"
+fi
+echo ""
+
+# ---- Create namespace-scoped secrets ----
+# Each create-*-secret.sh script is idempotent (`oc apply --dry-run=client | oc apply -f -`).
+# Required env vars were validated above, so these calls won't fail on missing creds.
+echo "==> Creating namespace-scoped secrets..."
+"$SCRIPT_DIR/create-license-secret.sh"
+"$SCRIPT_DIR/create-thatdot-registry-pull-secret.sh"
 echo ""
 
 # ---- Apply every Application CR ----
