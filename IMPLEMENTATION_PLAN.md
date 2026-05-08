@@ -158,42 +158,38 @@ open "https://$ROUTE"                                       # browser confirmati
 
 **Order of operations**
 
-Manifest-driven throughout. Steps interleave git, cluster, and shell actions — read carefully.
+Manifest-driven throughout. nginx and QE coexist briefly during step 2 — the cleanup of step 1 happens at the end, just before the PR merges, to avoid taking the namespace down while QE is still using it.
 
-1. *(Prereq, on `step-2-basic-qe` branch)* Confirm env vars are loaded:
+1. *(Prereq, on `step-2-basic-qe` branch)* Confirm env vars are loaded so `bootstrap.sh` will auto-create the secrets:
    ```bash
    echo "$THATDOT_REGISTRY_USERNAME" && echo "${QE_LICENSE_KEY:0:6}..."
    ```
 2. *(Already done by Claude)* All new files written under `bootstrap/`, `manifests/quine-enterprise/`, `scripts/`, plus updates to `bootstrap.sh`, `IMPLEMENTATION_PLAN.md`, `CLAUDE.md`.
-3. Remove the obsolete step-1 artifacts from git:
-   ```bash
-   git rm -rf manifests/step-1
-   git rm bootstrap/application-step-1.yaml
-   ```
-4. Commit + push to `step-2-basic-qe`.
-5. Cluster cleanup — delete the step-1 Application; the finalizer cascades to nginx Deployment + Service + Route + namespace:
-   ```bash
-   oc delete application step-1 -n openshift-gitops
-   ```
-6. Re-create the namespace from the new bootstrap file:
-   ```bash
-   oc apply -f bootstrap/namespace-thatdot-openshift.yaml
-   ```
-7. Create the secrets (must happen *after* namespace exists, *before* QE pod tries to pull):
-   ```bash
-   ./scripts/create-license-secret.sh
-   ./scripts/create-thatdot-registry-pull-secret.sh
-   ```
-8. Run the bootstrap (applies the `--enable-helm` patch, applies `application-quine-enterprise.yaml`):
+3. Commit + push to `step-2-basic-qe`. (Don't delete step-1 files yet — that comes after QE is verified.)
+4. Run the bootstrap. It is fully idempotent: applies the `--enable-helm` patch, the new namespace, both secrets (because env vars are set), and `application-quine-enterprise.yaml`. The existing step-1 nginx deployment is unaffected.
    ```bash
    ./scripts/bootstrap.sh
    ```
-9. Watch the sync until `Synced + Healthy`:
+5. Watch the sync until QE is `Synced + Healthy`:
    ```bash
    oc get application quine-enterprise -n openshift-gitops -w
    ```
-10. Verify (see Verification below).
-11. Finale (same shape as step 1): flip `targetRevision: step-2-basic-qe → main` as the last commit on the PR, merge, then `oc apply -f bootstrap/application-quine-enterprise.yaml` from main, branch auto-deletes.
+6. Verify (see Verification below). nginx is still running at its Route; QE is running at its own Route. No conflict.
+7. Cleanup step 1 — *only after QE is verified*. Order matters: strip the instance label first so the namespace survives the Application deletion.
+   ```bash
+   # Detach the namespace from step-1's ownership so the cascade doesn't take it down
+   oc label namespace thatdot-openshift app.kubernetes.io/instance-
+
+   # Delete the step-1 Application; its finalizer cascades to nginx Deployment/Service/Route only
+   oc delete application step-1 -n openshift-gitops
+
+   # Remove the obsolete files from git
+   git rm -rf manifests/step-1
+   git rm bootstrap/application-step-1.yaml
+   git commit -m "step 2: remove obsolete nginx artifacts"
+   git push origin step-2-basic-qe
+   ```
+8. Finale (same shape as step 1): flip `targetRevision: step-2-basic-qe → main` as the last commit on the PR, merge, then `oc apply -f bootstrap/application-quine-enterprise.yaml` from main, branch auto-deletes.
 
 **Gotchas to know in advance**
 

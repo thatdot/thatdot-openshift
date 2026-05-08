@@ -17,7 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# ---- Preflight ----
+# ---- Preflight: cluster auth ----
 if ! oc whoami >/dev/null 2>&1; then
     echo "ERROR: oc is not authenticated to a cluster."
     echo "  Did you forget: eval \"\$(crc oc-env)\" and 'oc login -u kubeadmin ...'?"
@@ -27,6 +27,29 @@ fi
 
 echo "Logged in as:  $(oc whoami)"
 echo "Cluster:       $(oc whoami --show-server)"
+echo ""
+
+# ---- Preflight: required env vars ----
+# Fail fast if any required env var is missing — collecting them all so the
+# user fixes everything in one round-trip rather than fix-rerun-fix-rerun.
+missing=()
+[[ -z "${QE_LICENSE_KEY:-}" ]] && missing+=("QE_LICENSE_KEY")
+[[ -z "${THATDOT_REGISTRY_USERNAME:-}" ]] && missing+=("THATDOT_REGISTRY_USERNAME")
+[[ -z "${THATDOT_REGISTRY_PASSWORD:-}" ]] && missing+=("THATDOT_REGISTRY_PASSWORD")
+
+if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "ERROR: required environment variable(s) not set:"
+    for var in "${missing[@]}"; do
+        echo "  - $var"
+    done
+    echo ""
+    echo "These are sourced from ~/.zshrc.local. To set them, append:"
+    echo "  export QE_LICENSE_KEY=\"...\""
+    echo "  export THATDOT_REGISTRY_USERNAME=\"...\""
+    echo "  export THATDOT_REGISTRY_PASSWORD=\"...\""
+    echo "Then 'source ~/.zshrc.local' or open a new terminal, and re-run."
+    exit 1
+fi
 echo ""
 
 # ---- Install OpenShift GitOps Operator ----
@@ -84,6 +107,14 @@ if [[ $applied_core -eq 0 ]]; then
 fi
 echo ""
 
+# ---- Create namespace-scoped secrets ----
+# Each create-*-secret.sh script is idempotent (`oc apply --dry-run=client | oc apply -f -`).
+# Required env vars were validated above, so these calls won't fail on missing creds.
+echo "==> Creating namespace-scoped secrets..."
+"$SCRIPT_DIR/create-license-secret.sh"
+"$SCRIPT_DIR/create-thatdot-registry-pull-secret.sh"
+echo ""
+
 # ---- Apply every Application CR ----
 echo "==> Applying Application CRs..."
 applied=0
@@ -103,11 +134,6 @@ echo ""
 
 # ---- Done ----
 echo "Done. ArgoCD is bootstrapped; Application(s) seeded."
-echo ""
-echo "If pods stay in ImagePullBackOff or sync errors with 'forbidden', the most"
-echo "common cause is missing Secrets in the target namespace. Run as needed:"
-echo "  ./scripts/create-license-secret.sh"
-echo "  ./scripts/create-thatdot-registry-pull-secret.sh"
 echo ""
 echo "Watch sync progress:"
 echo "  oc get application -n openshift-gitops -w"
