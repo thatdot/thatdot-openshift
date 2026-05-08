@@ -1,0 +1,32 @@
+# ArgoCD Application — seed for step 1's GitOps sync.
+# Applied directly with `oc apply`; not itself GitOps-managed.
+#
+# Iteration knob: `spec.source.targetRevision`.
+#   - During iteration:  `step-1` (the active branch)
+#   - When PR merges:    flip to `main` as the last commit on the PR,
+#                        then re-apply this file from main.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: step-1
+  namespace: openshift-gitops
+  finalizers:
+    # Cascade-delete synced resources when this Application is deleted.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/thatdot/thatdot-openshift
+    path: manifests/step-1
+    targetRevision: main
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: thatdot-openshift
+  syncPolicy:
+    automated:
+      selfHeal: true   # revert manual `oc edit` changes back to git state
+      prune: true      # delete resources that are removed from git
+    syncOptions:
+      - CreateNamespace=true   # safety net if namespace.yaml fails to apply
+      - ServerSideApply=true   # use SSA for cleaner field ownership

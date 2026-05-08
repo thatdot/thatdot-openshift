@@ -1,0 +1,14 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: thatdot-openshift
+  labels:
+    # Tells OpenShift GitOps to grant the ArgoCD instance in `openshift-gitops`
+    # permission to manage resources here. The operator watches for this label
+    # and provisions the RoleBinding automatically. Without it, ArgoCD sync
+    # fails with "forbidden" on every resource in this namespace.
+    argocd.argoproj.io/managed-by: openshift-gitops
+  annotations:
+    openshift.io/display-name: "thatDot OpenShift"
+    openshift.io/description: "Quine Enterprise + supporting services for the Wells Fargo PoC"

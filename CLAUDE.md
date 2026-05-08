@@ -10,6 +10,7 @@ The canonical document is **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)
 
 - **This repo is public on GitHub.** Never commit license keys, admin passwords, customer details, internal cluster URLs, or TLS private material. Secrets flow in via env vars at deploy time → `oc create secret`. Manifests reference secrets by name only.
 - **OpenShift-native lane is the deliberate choice.** When recommending tooling or patterns, default to OpenShift-native equivalents (Operators from OperatorHub, Routes, `service-ca`, OpenShift GitOps) rather than upstream patterns from `enterprise-oauth-reference`.
+- **Manifest-driven, not UI-driven.** All cluster state — operator Subscriptions, Namespaces, ArgoCD Applications, RoleBindings, everything — is expressed as YAML in this repo and applied via `oc apply` (for `bootstrap/` items) or GitOps sync (for `manifests/`). The OperatorHub web console is a *discovery* tool only; never install something through clicks without committing the resulting manifest. This is what makes Wells Fargo's eventual deployment reproducible from a clone.
 - **Walking-skeleton order matters.** Don't skip ahead from step N to step N+2. Each step's verification is the gate for the next.
 
 ## Architectural decisions (locked in)
@@ -40,6 +41,9 @@ oc whoami
 oc console        # opens OpenShift web console
 crc console --credentials   # admin password
 
+# Bootstrap (idempotent — re-run any time)
+./scripts/bootstrap.sh
+
 # Diagnostics
 oc get pods -A | grep -E "thatdot-openshift|gitops|operators"
 oc describe pod -n thatdot-openshift <pod> | grep -E "scc|runAsUser|Status"
@@ -59,14 +63,15 @@ README.md                    # external-facing entry point
 CLAUDE.md                    # this file
 .gitignore                   # secret-shaped patterns blocked
 .pre-commit-config.yaml      # gitleaks hook
-manifests/
-  step-1/                    # nginx + Route
+bootstrap/                   # Applied directly with `oc apply` (NOT GitOps-synced)
+  gitops-operator-subscription.yaml  # one-time, step-1
+  application-*.yaml                 # ArgoCD Application CR per step; seeds each sync
+manifests/                   # GitOps-synced by the Application CRs
+  step-1/                    # namespace + nginx + Route
   step-2/                    # QE standalone
   step-3/                    # + Cassandra
   step-4/                    # + Keycloak realm
   step-5/                    # + RBAC wiring
-gitops/
-  application-*.yaml         # ArgoCD Application CRs (one per step)
 ```
 
 ## Useful gotchas (from `enterprise-oauth-reference`)
@@ -76,6 +81,7 @@ gitops/
 - `--force-config` flag on QE so it uses YAML persistor config rather than the recipe's default ephemeral RocksDB.
 - QE OIDC library (`oidc4s`) requires `https://` for the issuer URL — non-negotiable. `service-ca` handles this for in-cluster TLS.
 - OpenShift `restricted-v2` SCC assigns a *random* UID. Helm charts pinning `runAsUser` will be rejected. Strip the field; let SCC pick.
+- **Every namespace ArgoCD syncs into needs the `argocd.argoproj.io/managed-by: openshift-gitops` label.** OpenShift GitOps's default ArgoCD is namespace-scoped by design; the operator watches for this label and provisions the RoleBinding. Without it, sync fails with "forbidden" on every resource. Same idiom on CRC and on Wells Fargo's eventual cluster.
 - Cassandra datacenter name is taken from the CR's `metadata.name` — keep Helm values' `cassandra.localDatacenter` aligned.
 
 ## When you finish a piece of work
