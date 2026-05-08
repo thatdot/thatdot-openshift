@@ -20,7 +20,7 @@ spec:
   source:
     repoURL: https://github.com/thatdot/thatdot-openshift
     path: manifests/cassandra
-    targetRevision: step-3-cassandra
+    targetRevision: main
   destination:
     server: https://kubernetes.default.svc
     namespace: thatdot-openshift
