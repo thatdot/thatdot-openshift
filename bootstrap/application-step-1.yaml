@@ -19,7 +19,7 @@ spec:
   source:
     repoURL: https://github.com/thatdot/thatdot-openshift
     path: manifests/step-1
-    targetRevision: step-1
+    targetRevision: main
   destination:
     server: https://kubernetes.default.svc
     namespace: thatdot-openshift
