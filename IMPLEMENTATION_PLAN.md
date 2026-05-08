@@ -122,7 +122,9 @@ oc get application -n openshift-gitops                      # Synced + Healthy
 oc get pods -n thatdot-openshift                            # nginx Running
 oc describe pod -n thatdot-openshift -l app=nginx | grep scc  # restricted-v2
 oc get route -n thatdot-openshift                           # HOST/PORT visible
-curl -k "https://$(oc get route nginx -n thatdot-openshift -o jsonpath='{.spec.host}')"  # nginx welcome HTML
+ROUTE=$(oc get route nginx -n thatdot-openshift -o jsonpath='{.spec.host}')
+curl -sk "https://$ROUTE" | head -5                         # nginx welcome HTML
+open "https://$ROUTE"                                       # browser confirmation (cert is trusted via trust-crc-ca.sh)
 ```
 
 **Done when** the Route URL serves the nginx welcome page in a browser, and the GitOps Application reports Synced + Healthy.
