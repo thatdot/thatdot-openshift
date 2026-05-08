@@ -23,6 +23,11 @@ spec:
   serverVersion: "4.1.4"
   size: 1                           # minimum allowed; v1 is single-node
 
+  # Run pods under our dedicated SA which has the `anyuid` SCC granted (see
+  # serviceaccount.yaml). cass-operator's pods set runAsUser/fsGroup to 999;
+  # restricted-v2 (the default SCC) rejects that, so we need an SA with anyuid.
+  serviceAccount: cassandra-sa
+
   # PVC against CRC's default StorageClass. On a real cluster, this would be a
   # higher-performance class (gp3, io2, etc.) sized to the workload.
   storageConfig:

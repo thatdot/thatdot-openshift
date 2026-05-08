@@ -4,5 +4,10 @@ kind: Kustomization
 
 # No Helm chart — cass-operator handles Cassandra cluster lifecycle from the CR.
 # This Kustomize root just registers the resources we want ArgoCD to apply.
+#
+# Order is logical (SA must exist before the operator creates pods that use it),
+# but Kustomize sorts resources by Kind anyway — ServiceAccount + RoleBinding
+# come before the CR regardless of listing order.
 resources:
+  - serviceaccount.yaml
   - cassandradatacenter.yaml
