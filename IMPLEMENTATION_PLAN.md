@@ -44,9 +44,14 @@ crc config set disk-size 60      # GB
 # Start the cluster (downloads ~5 GB the first time)
 crc start --pull-secret-file ~/Downloads/pull-secret.txt
 
-# Log in
+# Wire `oc` onto your PATH (one-time per shell)
 eval "$(crc oc-env)"
-oc login -u kubeadmin -p "$(crc console --credentials | grep kubeadmin | awk '{print $NF}')"
+
+# Print the login commands for both kubeadmin (cluster-admin) and developer
+crc console --credentials
+
+# Copy the kubeadmin `oc login -u kubeadmin -p ... https://api.crc.testing:6443`
+# command from the output above and run it. Then verify:
 oc whoami    # should return kubeadmin
 ```
 
