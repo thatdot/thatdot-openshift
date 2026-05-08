@@ -2,7 +2,7 @@
 
 ## What this is
 
-Discovery + first implementation pass to deploy Quine Enterprise into Red Hat OpenShift, on a local OpenShift Local (formerly CRC) cluster. Customer driver: Wells Fargo PoC. Tracking ticket: **[QU-2539](https://thatdot.atlassian.net/browse/QU-2539)**.
+Discovery + first implementation pass to deploy Quine Enterprise into Red Hat OpenShift, on a local OpenShift Local (formerly CRC) cluster. Tracking ticket: **[QU-2539](https://thatdot.atlassian.net/browse/QU-2539)**.
 
 The canonical document is **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)** — read it first. It has prerequisites, a 5-step walking-skeleton plan with verification per step, and a TL;DR checklist at the bottom that tracks progress.
 
@@ -10,7 +10,7 @@ The canonical document is **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)
 
 - **This repo is public on GitHub.** Never commit license keys, admin passwords, customer details, internal cluster URLs, or TLS private material. Secrets flow in via env vars at deploy time → `oc create secret`. Manifests reference secrets by name only.
 - **OpenShift-native lane is the deliberate choice.** When recommending tooling or patterns, default to OpenShift-native equivalents (Operators from OperatorHub, Routes, `service-ca`, OpenShift GitOps) rather than upstream patterns from `enterprise-oauth-reference`.
-- **Manifest-driven, not UI-driven.** All cluster state — operator Subscriptions, Namespaces, ArgoCD Applications, RoleBindings, everything — is expressed as YAML in this repo and applied via `oc apply` (for `bootstrap/` items) or GitOps sync (for `manifests/`). The OperatorHub web console is a *discovery* tool only; never install something through clicks without committing the resulting manifest. This is what makes Wells Fargo's eventual deployment reproducible from a clone.
+- **Manifest-driven, not UI-driven.** All cluster state — operator Subscriptions, Namespaces, ArgoCD Applications, RoleBindings, everything — is expressed as YAML in this repo and applied via `oc apply` (for `bootstrap/` items) or GitOps sync (for `manifests/`). The OperatorHub web console is a *discovery* tool only; never install something through clicks without committing the resulting manifest. This is what makes the eventual production deployment reproducible from a clone.
 - **Semantic naming, not step-numbered.** Files and directories are named by what they *are*, not by which step introduced them. `application-quine-enterprise.yaml`, `manifests/quine-enterprise/`, `manifests/cassandra/`, etc. Step numbers live in branch names (`step-2-basic-qe`) and the `IMPLEMENTATION_PLAN.md`, never in repo paths. (Step 1 used `step-1` paths; that was a v1 mistake corrected during step 2.)
 - **Walking-skeleton order matters.** Don't skip ahead from step N to step N+2. Each step's verification is the gate for the next.
 
@@ -18,8 +18,8 @@ The canonical document is **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Local cluster | OpenShift Local (CRC) | Same OCP bits Wells Fargo runs |
-| GitOps engine | OpenShift GitOps Operator | Red Hat–native; what Wells Fargo will use |
+| Local cluster | OpenShift Local (CRC) | Same OCP bits as a production OpenShift cluster |
+| GitOps engine | OpenShift GitOps Operator | Red Hat–native; the standard OpenShift GitOps path |
 | TLS source | OpenShift `service-ca` (in-cluster) + default Route edge cert | Zero-install; no PEM material in public repo |
 | Cassandra auth | Plaintext `PasswordAuthenticator` | Out of v1 scope; defer JWT auth |
 | Out of v1 scope | Novelty, Kafka | Reduce surface area for discovery |
@@ -91,7 +91,7 @@ scripts/                     # Helper scripts (idempotent)
 - `--force-config` flag on QE so it uses YAML persistor config rather than the recipe's default ephemeral RocksDB.
 - QE OIDC library (`oidc4s`) requires `https://` for the issuer URL — non-negotiable. `service-ca` handles this for in-cluster TLS.
 - OpenShift `restricted-v2` SCC assigns a *random* UID. Helm charts pinning `runAsUser` will be rejected. Strip the field; let SCC pick. *(QE 0.5.3 chart's default `securityContext: {}` is empty — no override needed.)*
-- **Every namespace ArgoCD syncs into needs the `argocd.argoproj.io/managed-by: openshift-gitops` label.** OpenShift GitOps's default ArgoCD is namespace-scoped by design; the operator watches for this label and provisions the RoleBinding. Without it, sync fails with "forbidden" on every resource. Same idiom on CRC and on Wells Fargo's eventual cluster.
+- **Every namespace ArgoCD syncs into needs the `argocd.argoproj.io/managed-by: openshift-gitops` label.** OpenShift GitOps's default ArgoCD is namespace-scoped by design; the operator watches for this label and provisions the RoleBinding. Without it, sync fails with "forbidden" on every resource. Same idiom on CRC and on a production OpenShift cluster.
 - **Kustomize + helmCharts requires `--enable-helm` on the ArgoCD instance.** Set via `oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '{"spec":{"kustomizeBuildOptions":"--enable-helm"}}'` in `bootstrap.sh`. Without it, `kustomization.yaml`'s `helmCharts:` blocks render as empty and you get a confusingly silent failure.
 - **Moving image tags require `imagePullPolicy: Always`.** Tags like `:main` get repointed by the registry; `IfNotPresent` would serve the kubelet's stale cache forever. Pinned semver tags (`:0.5.3`) can stay `IfNotPresent`.
 - **The QE 0.5.3 chart supports `imagePullSecrets` natively** (in `values.yaml`). No Kustomize patch needed; just set the field in our values file.
