@@ -1,0 +1,37 @@
+# Root ArgoCD Application — the single seed for everything else.
+#
+# Bootstrap.sh applies just this file (after installing the GitOps Operator,
+# patching ArgoCD, and creating the namespace + secrets). From here, the cascade is:
+#   root --> application-platform (wave 0) --> cass-operator-subscription, application-cassandra
+#        \-> application-product  (wave 1) --> application-quine-enterprise
+#
+# The resources-finalizer makes deletion cascade through the whole tree.
+# (i.e., `oc delete application root` removes everything app-of-apps planted.)
+#
+# Iteration knob: `spec.source.targetRevision`.
+#   - During iteration:  the active branch (e.g., `app-of-apps`)
+#   - After PR merge:    flip to `main` as the last commit on the PR,
+#                        then re-apply this file from main.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/thatdot/thatdot-openshift
+    path: manifests/root
+    targetRevision: app-of-apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - ServerSideApply=true

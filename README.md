@@ -2,16 +2,19 @@
 
 Reference deployment of [Quine Enterprise](https://www.thatdot.com/quine-enterprise) onto Red Hat OpenShift, with Cassandra as its persistor and Keycloak for OIDC-based RBAC.
 
-> **Status:** step 3 of 5 complete — Quine Enterprise persisting through Cassandra (no RBAC yet). See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) for progress.
+> **Status:** step 3 of 6 complete — Quine Enterprise persisting through Cassandra (no RBAC yet). Step 4 (app-of-apps refactor) in progress on branch `app-of-apps`. See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) for progress.
 
 ## What's here
 
 - **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)** — prerequisites, step-by-step deployment plan with verification at each step, and a TL;DR checklist at the bottom.
 - **[`CLAUDE.md`](./CLAUDE.md)** — context for engineers (and Claude Code) picking up the work.
-- `bootstrap/` — applied directly (`oc apply`), seeds GitOps. Contains the GitOps Operator Subscription, the cass-operator Subscription, the shared `thatdot-openshift` namespace, the QE + Cassandra ArgoCD Application CRs, and the `argocd-customizations.yaml` patch (Kustomize+Helm + custom CassandraDatacenter health check).
-- `manifests/quine-enterprise/` — Kustomize root sync'd by ArgoCD: pulls the QE Helm chart from `helm.thatdot.com`, renders with `values.yaml`, adds an OpenShift Route + a `wait-for-cassandra` init container patch.
-- `manifests/cassandra/` — Kustomize root sync'd by ArgoCD: a `CassandraDatacenter` CR (managed by k8ssandra cass-operator) plus a RoleBinding granting the namespace's `default` SA the `anyuid` SCC.
-- `scripts/` — `bootstrap.sh` (idempotent cluster bootstrap, fail-fast on missing env vars), `trust-crc-ca.sh` (browser trust), `create-license-secret.sh`, `create-thatdot-registry-pull-secret.sh`.
+- `bootstrap/` — applied directly (`oc apply`); the only things GitOps can't manage itself. Four files: the GitOps Operator Subscription, the `argocd-customizations.yaml` patch (Kustomize+Helm + CassandraDatacenter health check), the shared `thatdot-openshift` namespace, and `root-application.yaml` (the single seed for everything else).
+- `manifests/root/` — synced by `root-application`. Contains `application-platform.yaml` (sync-wave 0) and `application-product.yaml` (sync-wave 1) — the two children of the root.
+- `manifests/platform/` — synced by `application-platform`. Operator subscriptions + ArgoCD Applications for infra workloads (today: cass-operator + Cassandra; future: identity).
+- `manifests/product/` — synced by `application-product`. ArgoCD Applications for differentiating workloads (today: QE; future: Novelty).
+- `manifests/quine-enterprise/` — leaf. Kustomize root synced by `application-quine-enterprise`: pulls the QE Helm chart from `helm.thatdot.com`, renders with `values.yaml`, adds an OpenShift Route + a `wait-for-cassandra` init container patch.
+- `manifests/cassandra/` — leaf. Kustomize root synced by `application-cassandra`: a `CassandraDatacenter` CR (managed by k8ssandra cass-operator) plus a RoleBinding granting the namespace's `default` SA the `anyuid` SCC.
+- `scripts/` — `bootstrap.sh` (idempotent cluster bootstrap, fail-fast on missing env vars; ends by seeding the root Application), `trust-crc-ca.sh` (browser trust), `create-license-secret.sh`, `create-thatdot-registry-pull-secret.sh`.
 
 ## Target environment
 
@@ -24,6 +27,10 @@ Single-node [OpenShift Local](https://developers.redhat.com/products/openshift-l
 | GitOps engine | OpenShift GitOps Operator (Red Hat–packaged ArgoCD) |
 | In-cluster TLS | OpenShift `service-ca` (no cert-manager) |
 | Cassandra auth | None (`AllowAllAuthenticator`) — out of scope for v1 |
+
+## Conventions
+
+**Cross-service runtime dependencies use `initContainer` probes, not ArgoCD sync-waves.** Sync-waves order *applies*, not *readiness* — a "Synced" resource may not yet be serving traffic. Every long-running workload that depends on another service ships an init container that probes the dependency and exits 0 only once it's reachable. Canonical example: `manifests/quine-enterprise/patches/wait-for-cassandra.yaml` (TCP connect via bash `</dev/tcp/HOST/PORT`). Side benefit: every pod restart re-probes, so a transient dep outage doesn't trigger a crashloop on connection-refused.
 
 ## Public-repo notice
 
@@ -123,3 +130,47 @@ open "https://$ROUTE"                               # browser: QE landing page (
 4. **No built-in ArgoCD health check for `CassandraDatacenter`.** Without the custom Lua check we registered, ArgoCD would report Healthy immediately on CR creation, long before Cassandra is actually serving. The check watches `cassandraOperatorProgress: Ready` plus the `Ready` condition.
 5. **Init container pattern beats sync waves for cross-Application ordering.** QE depends on Cassandra being up. We considered ArgoCD app-of-apps + sync waves; chose a pod-level init container instead. Simpler, doesn't require restructuring, and resilient to pod restarts (every QE pod start re-checks Cassandra reachability).
 6. **ArgoCD sync backoff after repeated failures.** When sync fails several times in a row, ArgoCD's auto-retry backs off — could be 10+ min before it tries again. After pushing a fix, use `oc annotate application <app> argocd.argoproj.io/refresh=hard --overwrite` to force an immediate re-fetch from git.
+
+### Step 4 — App-of-apps refactor (platform/product split)
+
+**What it proves:** the same end-state cluster as step 3, reached via a 3-level GitOps cascade rather than imperative bash loops. `bootstrap.sh` now seeds *one* `Application` (`root`) and ArgoCD owns the rest. Adding a new operator → a file in `manifests/platform/`. Adding a new workload → a file in `manifests/product/`. No `bootstrap.sh` edit, no re-running on existing clusters.
+
+**The cascade:**
+
+```
+root (bootstrap/root-application.yaml)
+ ├── application-platform   (sync-wave 0)  →  manifests/platform/
+ │     ├── cass-operator-subscription      (sync-wave 0; install operator + wait for CSV)
+ │     └── application-cassandra           (sync-wave 1; CRD now exists, CR creation succeeds)
+ │           └── manifests/cassandra/      (CassandraDatacenter, SA + RoleBinding)
+ └── application-product    (sync-wave 1)  →  manifests/product/
+       └── application-quine-enterprise
+             └── manifests/quine-enterprise/  (Helm chart + Route + wait-for-cassandra patch)
+```
+
+**What was added:**
+
+- `bootstrap/root-application.yaml` — single seed Application; `path: manifests/root`; carries `resources-finalizer` so root deletion cascades through the whole tree.
+- `manifests/root/{kustomization.yaml, application-platform.yaml, application-product.yaml}` — the two children of root, ordered by sync-wave annotations.
+- `manifests/platform/{kustomization.yaml, cass-operator-subscription.yaml, application-cassandra.yaml}` — operator subscription + Cassandra Application, internally ordered (sub at wave 0, App at wave 1).
+- `manifests/product/{kustomization.yaml, application-quine-enterprise.yaml}` — QE Application.
+- New `Conventions` section at the top of this README documenting the cross-service init-container rule.
+
+**What was removed:**
+
+- `bootstrap/application-quine-enterprise.yaml`, `bootstrap/application-cassandra.yaml`, `bootstrap/cass-operator-subscription.yaml` — moved into `manifests/`.
+- The three `for resource in bootstrap/*-foo.yaml` loops in `scripts/bootstrap.sh` — replaced by one `oc apply` of the namespace and one of the root Application.
+
+**What stayed in `bootstrap/` and why:**
+
+- `gitops-operator-subscription.yaml` — ArgoCD can't manage its own install.
+- `argocd-customizations.yaml` — must be patched into the ArgoCD CR before the first sync runs (otherwise Kustomize+Helm renders empty and the CassandraDatacenter health check is missing).
+- `namespace-thatdot-openshift.yaml` — preconditional. The OpenShift GitOps Operator watches namespaces for the `argocd.argoproj.io/managed-by` label and provisions the `RoleBinding` *asynchronously*. If we let GitOps create the namespace, the very first wrapper sync races with that RoleBinding and fails `forbidden`. Also: the secrets created by `bootstrap.sh` need the namespace to exist.
+- `root-application.yaml` — the seed.
+
+**Gotchas surfaced:**
+
+1. **3 levels is the cap.** Codefresh's research is explicit: 4+ levels of nested Applications turns debugging into a multi-step traversal. If we ever outgrow this structure, switch the wrapper layer to ApplicationSet rather than nesting deeper.
+2. **`prune: true` everywhere means deletion cascades.** Removing `application-X.yaml` from a wrapper's folder deletes that child Application *and* its workload (via `resources-finalizer`). That's the GitOps semantics, but worth knowing for "I deleted a file to test something."
+3. **Sync-wave gating relies on built-in health checks.** ArgoCD's built-in checks for `argoproj.io/Application` and `operators.coreos.com/Subscription` are doing the actual gating between waves. We deliberately did *not* add custom Lua for either — only the existing `CassandraDatacenter` check from step 3. If observation showed wrappers reporting Healthy prematurely, the fallback would be Lua in `argocd-customizations.yaml`.
+4. **Sync-wave inside a single Application orders *resources*, not *Applications*.** The annotations on `application-platform.yaml` and `application-product.yaml` work because, from the root Application's perspective, those are just resources it's syncing. Same trick inside `manifests/platform/` for the Subscription → application-cassandra ordering.

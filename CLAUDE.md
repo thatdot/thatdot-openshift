@@ -13,6 +13,7 @@ The canonical document is **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)
 - **Manifest-driven, not UI-driven.** All cluster state — operator Subscriptions, Namespaces, ArgoCD Applications, RoleBindings, everything — is expressed as YAML in this repo and applied via `oc apply` (for `bootstrap/` items) or GitOps sync (for `manifests/`). The OperatorHub web console is a *discovery* tool only; never install something through clicks without committing the resulting manifest. This is what makes the eventual production deployment reproducible from a clone.
 - **Semantic naming, not step-numbered.** Files and directories are named by what they *are*, not by which step introduced them. `application-quine-enterprise.yaml`, `manifests/quine-enterprise/`, `manifests/cassandra/`, etc. Step numbers live in branch names (`step-2-basic-qe`) and the `IMPLEMENTATION_PLAN.md`, never in repo paths. (Step 1 used `step-1` paths; that was a v1 mistake corrected during step 2.)
 - **Walking-skeleton order matters.** Don't skip ahead from step N to step N+2. Each step's verification is the gate for the next.
+- **Cross-service runtime dependencies live at the pod level, not the sync-wave level.** ArgoCD sync-waves order *applies*, not *readiness* — a wave-N resource being "Synced" doesn't mean it's actually serving when wave-N+1 starts. Every long-running workload that depends on another service MUST ship an `initContainer` that probes the dependency at runtime and exits 0 only once it's reachable. Canonical example: `manifests/quine-enterprise/patches/wait-for-cassandra.yaml` (TCP connect via bash `</dev/tcp/HOST/PORT` against `quine-dc1-service:9042`). Bonus: this is also resilient to *subsequent* dep outages — every pod restart re-probes rather than crashlooping on connection-refused.
 
 ## Architectural decisions (locked in)
 
@@ -56,7 +57,7 @@ oc get csv -n openshift-operators
 oc create secret generic qe-license --from-literal=license-key="$QE_LICENSE_KEY"
 ```
 
-## File layout (will grow as work progresses)
+## File layout
 
 ```
 IMPLEMENTATION_PLAN.md       # canonical plan + checklist (start here)
@@ -64,21 +65,51 @@ README.md                    # external-facing entry point
 CLAUDE.md                    # this file
 .gitignore                   # secret-shaped patterns blocked
 .pre-commit-config.yaml      # gitleaks hook
-bootstrap/                   # Applied directly with `oc apply` (NOT GitOps-synced)
-  gitops-operator-subscription.yaml   # OpenShift GitOps Operator install
-  namespace-thatdot-openshift.yaml    # shared workload namespace (also has the managed-by label)
-  application-quine-enterprise.yaml   # ArgoCD Application — QE
-  application-cassandra.yaml          # (step 3, future)
-  application-keycloak.yaml           # (step 4, future)
-manifests/                   # GitOps-synced by Application CRs (Kustomize roots)
-  quine-enterprise/          # QE Helm chart + values + Route + future patches
-    kustomization.yaml       #   helmCharts: + resources: + (later) patches:
-    values.yaml              #   QE Helm values
-    route.yaml               #   OpenShift Route (chart doesn't ship one)
-  cassandra/                 # (step 3, future)
-  keycloak/                  # (step 4, future)
+
+bootstrap/                   # Applied directly with `oc apply` (NOT GitOps-synced).
+                             # Means: "applied imperatively because GitOps can't (yet) manage it."
+                             # Four files only:
+  gitops-operator-subscription.yaml   # OpenShift GitOps Operator install (chicken-and-egg: ArgoCD can't manage its own install)
+  argocd-customizations.yaml          # ArgoCD CR patch: --enable-helm + CassandraDatacenter Lua health check
+  namespace-thatdot-openshift.yaml    # Shared workload namespace + managed-by label.
+                                      # Preconditional — operator-provisioned RoleBinding must exist
+                                      # before ArgoCD syncs into the namespace; secrets need it too.
+  root-application.yaml               # Single seed; ArgoCD takes over from here.
+
+manifests/                   # GitOps-synced. The 3-level app-of-apps tree:
+                             #   root --> platform (wave 0) --> cass-operator + cassandra leaf
+                             #        \-> product  (wave 1) --> quine-enterprise leaf
+  root/                      # What root-application.yaml syncs.
+    kustomization.yaml       #   resources: [application-platform.yaml, application-product.yaml]
+    application-platform.yaml   # sync-wave "0"; itself an app-of-apps over manifests/platform/
+    application-product.yaml    # sync-wave "1"; itself an app-of-apps over manifests/product/
+
+  platform/                  # Operator subscriptions + ArgoCD Apps for infra workloads.
+                             # Future home of identity (Keycloak — step 5), monitoring, etc.
+    kustomization.yaml
+    cass-operator-subscription.yaml   # OperatorGroup + Subscription (sync-wave "0")
+    application-cassandra.yaml        # ArgoCD App for Cassandra (sync-wave "1")
+
+  product/                   # ArgoCD Apps for differentiating workloads.
+                             # Future home of Novelty, etc.
+    kustomization.yaml
+    application-quine-enterprise.yaml
+
+  cassandra/                 # LEAF: synced by manifests/platform/application-cassandra.yaml.
+    kustomization.yaml       #   resources: SA + RoleBinding + CassandraDatacenter CR
+    cassandradatacenter.yaml
+    serviceaccount.yaml
+
+  quine-enterprise/          # LEAF: synced by manifests/product/application-quine-enterprise.yaml.
+    kustomization.yaml       #   helmCharts: QE 0.5.3, resources: route.yaml, patches: wait-for-cassandra
+    values.yaml
+    route.yaml
+    patches/
+      wait-for-cassandra.yaml   # initContainer: blocks until Cassandra accepts CQL — the canonical
+                                # cross-service runtime dependency pattern (see Critical Rules)
+
 scripts/                     # Helper scripts (idempotent)
-  bootstrap.sh               # Install GitOps + apply Application CRs
+  bootstrap.sh               # Install GitOps Operator + patch ArgoCD + namespace + secrets + seed root
   trust-crc-ca.sh            # Trust CRC ingress CA in macOS keychain (Chrome/Safari)
   create-license-secret.sh   # $QE_LICENSE_KEY → qe-license Secret
   create-thatdot-registry-pull-secret.sh   # $THATDOT_REGISTRY_* → thatdot-registry-creds Secret

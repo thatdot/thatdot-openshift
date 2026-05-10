@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bootstrap the cluster with OpenShift GitOps + every committed Application CR.
+# Bootstrap the cluster for app-of-apps GitOps.
 #
-# After this script, ArgoCD takes over: it watches the branch each
-# Application CR points at and continuously syncs `manifests/*` → cluster.
-# This script's job is just to seed that loop.
+# Imperative phase (this script):
+#   1. Install OpenShift GitOps Operator + wait for ArgoCD ready
+#   2. Patch ArgoCD with our customizations (--enable-helm + CassandraDatacenter health check)
+#   3. Apply the shared workload namespace (preconditional; ArgoCD needs the
+#      managed-by label active before it can sync into the namespace)
+#   4. Create out-of-band secrets (license, registry pull-secret) from env vars
+#   5. Seed the root Application — ArgoCD takes over from here
+#
+# After this script, ArgoCD owns everything else. The cascade is:
+#   root --> application-platform (wave 0) --> cass-operator-subscription, application-cassandra
+#        \-> application-product  (wave 1) --> application-quine-enterprise
 #
 # Idempotent: re-run any time. Every action is `oc apply`, every wait
 # tolerates the resource already being ready.
@@ -86,26 +94,21 @@ echo ""
 # bootstrap/argocd-customizations.yaml carries:
 #   - kustomizeBuildOptions: --enable-helm  (so kustomize honors helmCharts: blocks)
 #   - resourceHealthChecks for CRDs ArgoCD doesn't know about natively (CassandraDatacenter)
-echo "==> Patching ArgoCD instance with customizations (Kustomize+Helm, custom health checks)..."
+echo "==> Patching ArgoCD instance with customizations (Kustomize+Helm, CassandraDatacenter health check)..."
 oc patch argocd openshift-gitops -n openshift-gitops --type merge \
     --patch-file "$PROJECT_DIR/bootstrap/argocd-customizations.yaml"
 echo ""
 
-# ---- Apply shared cluster resources (namespaces, etc.) ----
-# These live in bootstrap/ rather than under any one step's manifests/ because
-# they're shared infrastructure across every step. Applied directly via `oc apply`,
-# never managed by ArgoCD's prune logic.
-echo "==> Applying shared cluster resources..."
-applied_core=0
-for resource in "$PROJECT_DIR"/bootstrap/namespace-*.yaml; do
-    [[ -f "$resource" ]] || continue
-    echo "    + $(basename "$resource")"
-    oc apply -f "$resource"
-    applied_core=$((applied_core + 1))
-done
-if [[ $applied_core -eq 0 ]]; then
-    echo "    (no namespace-*.yaml files in bootstrap/ — nothing to apply)"
-fi
+# ---- Apply the shared namespace (preconditional) ----
+# Stays imperative because:
+#   1. The OpenShift GitOps Operator watches namespaces for the managed-by label
+#      and creates the RoleBinding asynchronously. If we let GitOps create the
+#      namespace, the first wrapper sync races with the operator's RoleBinding
+#      provisioning and fails "forbidden" until ArgoCD retries.
+#   2. The secrets created below are namespace-scoped and need this namespace
+#      to exist already.
+echo "==> Applying shared workload namespace..."
+oc apply -f "$PROJECT_DIR/bootstrap/namespace-thatdot-openshift.yaml"
 echo ""
 
 # ---- Create namespace-scoped secrets ----
@@ -116,45 +119,18 @@ echo "==> Creating namespace-scoped secrets..."
 "$SCRIPT_DIR/create-thatdot-registry-pull-secret.sh"
 echo ""
 
-# ---- Apply other operator subscriptions (cass-operator, future others) ----
-# The OpenShift GitOps Operator subscription is applied earlier (special — it's
-# the bootstrap of GitOps itself). Other operators install via the same
-# Subscription idiom but only after their target namespace and OperatorGroup exist.
-echo "==> Applying additional operator subscriptions..."
-applied_subs=0
-for sub in "$PROJECT_DIR"/bootstrap/*-operator-subscription.yaml; do
-    [[ -f "$sub" ]] || continue
-    [[ "$(basename "$sub")" == "gitops-operator-subscription.yaml" ]] && continue
-    echo "    + $(basename "$sub")"
-    oc apply -f "$sub"
-    applied_subs=$((applied_subs + 1))
-done
-if [[ $applied_subs -eq 0 ]]; then
-    echo "    (no additional operator subscriptions in bootstrap/ — nothing to apply)"
-fi
-echo ""
-
-# ---- Apply every Application CR ----
-echo "==> Applying Application CRs..."
-applied=0
-for app in "$PROJECT_DIR"/bootstrap/application-*.yaml; do
-    [[ -f "$app" ]] || continue
-    echo "    + $(basename "$app")"
-    oc apply -f "$app"
-    applied=$((applied + 1))
-done
-
-if [[ $applied -eq 0 ]]; then
-    echo "    (no Application CRs found in bootstrap/ — nothing to seed)"
-else
-    echo "    Applied $applied Application CR(s)."
-fi
+# ---- Seed the root Application ----
+# Everything else flows from this single CR. ArgoCD now owns the cascade:
+#   root --> application-platform (wave 0) --> cass-operator-subscription, application-cassandra
+#        \-> application-product  (wave 1) --> application-quine-enterprise
+echo "==> Seeding root Application..."
+oc apply -f "$PROJECT_DIR/bootstrap/root-application.yaml"
 echo ""
 
 # ---- Done ----
-echo "Done. ArgoCD is bootstrapped; Application(s) seeded."
+echo "Done. ArgoCD is bootstrapped; root Application seeded."
 echo ""
-echo "Watch sync progress:"
+echo "Watch the cascade (root → platform → product, ~5-7 min cold-start):"
 echo "  oc get application -n openshift-gitops -w"
 echo ""
 

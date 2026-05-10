@@ -1,0 +1,33 @@
+# Wrapper Application — "product" layer.
+# Itself an app-of-apps: syncs manifests/product/, which contains the ArgoCD
+# Applications for differentiating workloads (QE today; Novelty if scope grows).
+#
+# sync-wave "1": runs after "platform" (wave 0). The built-in Application health
+# check on the platform wrapper keeps it Progressing until cass-operator's CSV
+# is Succeeded and Cassandra is Ready, so when product starts the CRDs and
+# services it depends on are real.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: application-product
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/thatdot/thatdot-openshift
+    path: manifests/product
+    targetRevision: app-of-apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - ServerSideApply=true

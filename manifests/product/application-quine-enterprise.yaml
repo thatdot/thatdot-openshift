@@ -1,10 +1,9 @@
 # ArgoCD Application — Quine Enterprise.
-# Applied directly with `oc apply`; not itself GitOps-managed.
+# Synced by application-product (the parent wrapper).
 #
 # Iteration knob: `spec.source.targetRevision`.
-#   - During iteration:  the active branch (e.g., `step-2-basic-qe`)
-#   - After PR merge:    flip to `main` as the last commit on the PR,
-#                        then re-apply this file from main.
+#   - During iteration:  the active branch (e.g., `app-of-apps`)
+#   - After PR merge:    flip to `main` as the last commit on the PR.
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -19,7 +18,7 @@ spec:
   source:
     repoURL: https://github.com/thatdot/thatdot-openshift
     path: manifests/quine-enterprise
-    targetRevision: main
+    targetRevision: app-of-apps
   destination:
     server: https://kubernetes.default.svc
     namespace: thatdot-openshift

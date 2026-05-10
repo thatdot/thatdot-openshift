@@ -1,0 +1,32 @@
+# Wrapper Application — "platform" layer.
+# Itself an app-of-apps: syncs manifests/platform/, which contains operator
+# subscriptions and the ArgoCD Applications for infra workloads (Cassandra
+# today; identity/Keycloak in step 5).
+#
+# sync-wave "0": runs before "product" (wave 1) so operator CRDs and infra
+# services exist before product workloads try to consume them.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: application-platform
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/thatdot/thatdot-openshift
+    path: manifests/platform
+    targetRevision: app-of-apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - ServerSideApply=true

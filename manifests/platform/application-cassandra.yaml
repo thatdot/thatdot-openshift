@@ -1,16 +1,21 @@
 # ArgoCD Application — Cassandra (cass-operator-managed).
-# Applied directly with `oc apply`; not itself GitOps-managed.
+# Synced by application-platform (the parent wrapper).
+#
+# sync-wave "1" inside manifests/platform/: applies AFTER cass-operator-subscription
+# (wave 0) reaches Healthy / CSV Succeeded, so the CassandraDatacenter CRD exists
+# by the time this Application creates the CR.
 #
 # Iteration knob: `spec.source.targetRevision`.
-#   - During iteration:  the active branch (e.g., `step-3-cassandra`)
-#   - After PR merge:    flip to `main` as the last commit on the PR,
-#                        then re-apply this file from main.
+#   - During iteration:  the active branch (e.g., `app-of-apps`)
+#   - After PR merge:    flip to `main` as the last commit on the PR.
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: cassandra
   namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
   finalizers:
     # Cascade-delete synced resources (the CassandraDatacenter CR) when this
     # Application is deleted. The operator then cleans up StatefulSet, PVCs, etc.
@@ -20,7 +25,7 @@ spec:
   source:
     repoURL: https://github.com/thatdot/thatdot-openshift
     path: manifests/cassandra
-    targetRevision: main
+    targetRevision: app-of-apps
   destination:
     server: https://kubernetes.default.svc
     namespace: thatdot-openshift
