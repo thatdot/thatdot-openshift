@@ -1,4 +1,4 @@
-# k8ssandra cass-operator install — applied directly with `oc apply` by bootstrap.sh.
+# k8ssandra cass-operator install — synced by application-platform.
 #
 # Install mode: OwnNamespace. The OperatorGroup lives in `thatdot-openshift` and
 # targets that same namespace, so the operator pod runs alongside the workloads
@@ -8,12 +8,19 @@
 #
 # Package name: `cass-operator-community` (the bare `cass-operator` belongs to a
 # different/conflicting catalog entry).
+#
+# sync-wave "0" inside manifests/platform/: this must reach Healthy (CSV Succeeded)
+# before wave 1 (application-cassandra) tries to apply a CassandraDatacenter CR
+# whose CRD this operator installs. ArgoCD's built-in Subscription health check
+# does the gating.
 ---
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
   name: thatdot-openshift-operators
   namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   targetNamespaces:
     - thatdot-openshift   # OwnNamespace: target == operator's own namespace
@@ -23,6 +30,8 @@ kind: Subscription
 metadata:
   name: cass-operator-community
   namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   channel: stable
   installPlanApproval: Automatic

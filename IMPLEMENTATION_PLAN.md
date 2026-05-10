@@ -330,24 +330,161 @@ oc exec -n thatdot-openshift quine-dc1-default-sts-0 -c cassandra -- \
 
 ---
 
-### Step 4 — Add Keycloak with `quine-enterprise` realm
+### Step 4 — App-of-apps refactor (platform/product split)
 
-**Goal:** Stand up Keycloak with the realm pre-configured, *before* wiring QE to it. Isolates Keycloak issues from OIDC-integration issues.
+**Goal:** Shrink `bootstrap.sh` to a minimal seed and let GitOps own the rest. Reorganize manifests into a 3-level app-of-apps hierarchy (`root → platform / product → leaf`) so adding a new operator or workload becomes "edit one folder, commit" rather than "edit bash + re-run on every cluster." Foundational refactor *before* Keycloak — easier to do this with one workload + one infra dep than with four.
+
+**Architectural decisions baked in**
+
+- **3 levels exactly.** Root → category (platform/product) → leaf (per workload). The Codefresh "max 3" guidance counts the manifest layer too, but for nested Applications this is the standard 2-deep structure. Don't go deeper; if more grouping is ever needed, switch the wrapper layer to ApplicationSet rather than nesting further.
+- **Platform vs. product split.**
+  - *Platform* = operator subscriptions + the infra workloads QE depends on (Cassandra today; Keycloak in step 5 — identity is platform infra).
+  - *Product* = differentiating workloads (QE today; Novelty if scope grows).
+- **Operator subscriptions become GitOps-managed.** `cass-operator-subscription.yaml` moves out of imperative `bootstrap/` into `manifests/platform/`. Chicken-and-egg things stay in `bootstrap/`: the GitOps Operator install, ArgoCD instance customizations, the shared `thatdot-openshift` namespace (preconditional — the OpenShift GitOps Operator needs the `argocd.argoproj.io/managed-by` label present *before* ArgoCD tries to sync into the namespace, otherwise the first wrapper sync races with the operator's RoleBinding provisioning; secrets also need the namespace to exist), and the root Application seed.
+- **Rely on built-in Application health.** Modern ArgoCD has a working built-in health check for the `argoproj.io/Application` kind: a wrapper Application reports Healthy when its children are Healthy. We start without any custom Application-level Lua. If observation shows wrappers reporting Healthy prematurely (or sync-wave gating not actually waiting for children), we add the Lua then — not before.
+- **Sync-waves and init containers are complementary, not alternatives.** Sync-waves at the Application level (newly added in this step's tree) handle "things created in the right order" — wave 0 wrappers / Subscriptions before wave 1 wrappers / their CRs. The existing `wait-for-cassandra` init container in `manifests/quine-enterprise/patches/` (from step 3) handles "the dep is actually serving" — and continues to fire on every pod restart. Both are required for any cross-service dependency. See the Conventions section in README and the Critical Rules bullet in CLAUDE.md.
 
 **What's added**
-- `manifests/step-4/keycloak/`: Keycloak Deployment (or RHBK Operator from OperatorHub — decide during the step), PostgreSQL for Keycloak storage, realm import (Job using `keycloak-config-cli`, or `KeycloakRealmImport` CR if using the operator)
-- Realm config (port from `../opstools/keycloak/k8s/realm.json`):
-  - 1 client: `quine-enterprise`
-  - 6 roles: `superadmin`, `admin`, `architect`, `dataengineer`, `analyst`, `billing`
-  - 6 test users with matching passwords (placeholders ok in v1; rotate before any sharing)
-- Keycloak Service annotated with `service.beta.openshift.io/serving-cert-secret-name` so OpenShift mints the TLS cert
-- Route exposing the Keycloak admin console
+- `bootstrap/root-application.yaml` — single seed Application; `spec.source.path: manifests/root`; carries `resources-finalizer.argocd.argoproj.io` so deletion cascades through the whole tree.
+- `manifests/root/`:
+  - `kustomization.yaml` — `resources: [application-platform.yaml, application-product.yaml]`.
+  - `application-platform.yaml` — sync-wave `"0"`, points at `manifests/platform/`, carries `resources-finalizer`.
+  - `application-product.yaml` — sync-wave `"1"`, points at `manifests/product/`, carries `resources-finalizer`.
+- `manifests/platform/`:
+  - `kustomization.yaml`
+  - `cass-operator-subscription.yaml` *(moved from `bootstrap/`, sync-wave `"0"`)*
+  - `application-cassandra.yaml` *(moved from `bootstrap/`, sync-wave `"1"`)*
+- `manifests/product/`:
+  - `kustomization.yaml`
+  - `application-quine-enterprise.yaml` *(moved from `bootstrap/`)*
+
+`bootstrap/argocd-customizations.yaml` is unchanged from step 3 (still just `--enable-helm` + the `CassandraDatacenter` Lua check). No new Lua in step 4 — see Architectural decisions for the rationale.
+
+**What's removed**
+- `bootstrap/application-quine-enterprise.yaml`, `bootstrap/application-cassandra.yaml`, `bootstrap/cass-operator-subscription.yaml` — moved into `manifests/`.
+- The three loops in `scripts/bootstrap.sh` (over `namespace-*.yaml`, `*-operator-subscription.yaml`, `application-*.yaml`) — replaced by a direct `oc apply` of the namespace and a single `oc apply -f bootstrap/root-application.yaml` for the seed.
+
+**Refactored**
+- `scripts/bootstrap.sh` collapses to: preflight → install GitOps Operator → wait → patch ArgoCD customizations → apply namespace → create out-of-band secrets → seed root Application. Roughly half its current length.
+- `CLAUDE.md` "File layout" + "Useful gotchas" sections updated for the new tree.
+- `README.md` "What's here" reflects the new directory layout.
+
+**Order of operations**
+
+1. **Clean slate.** No partial migration — wipe and rebuild for a verified-clean starting state. Manifests + secrets are all reproducible from Git + env vars; nothing in the cluster is precious. The new bootstrap path is what's being tested, so exercising it from absolute zero is the strongest verification.
+   ```bash
+   crc delete -f
+   crc start --pull-secret-file ~/Downloads/pull-secret.txt
+   eval "$(crc oc-env)"
+   oc login -u kubeadmin -p <pw> https://api.crc.testing:6443      # `crc console --credentials` for pw
+   ./scripts/trust-crc-ca.sh                                        # CRC regenerates its CA on each fresh deploy
+   ```
+   Verify clean before proceeding:
+   ```bash
+   crc status                                       # Running, fresh
+   oc get ns | grep -E 'thatdot|gitops|operators'   # only kube-* / openshift-* defaults; no openshift-gitops
+   oc get crd | grep -E 'cassandra|argo'            # empty
+   ```
+
+2. *(On `app-of-apps` branch, already done by Claude when files are written)* New manifest tree, new root Application, updated `argocd-customizations.yaml`, slimmed `bootstrap.sh`, updated docs.
+
+3. Commit + push to `app-of-apps`. Set `targetRevision: app-of-apps` on every Application CR (root + both wrappers + both leaves) for the iteration phase.
+
+4. Run the bootstrap. New flow: install GitOps Operator → wait → patch ArgoCD customizations → apply namespace → create secrets → seed *one* Application:
+   ```bash
+   ./scripts/bootstrap.sh
+   ```
+
+5. Watch the cascade. Root → platform (subs + Cassandra) → product (QE). Full cold-start from empty cluster ~5–7 min:
+   ```bash
+   oc get application -n openshift-gitops -w
+   ```
+
+6. Verify (see below). The win condition is identical to step 3 — Cypher write survives QE pod restart — but reached via the new bootstrap path.
+
+7. Finale: flip every `targetRevision` to `main` as last commit on the PR, merge, post-merge `oc apply -f bootstrap/root-application.yaml` from main.
+
+**Gotchas to know in advance**
+
+- **Sync-wave gating depends on built-in health checks doing the right thing.** ArgoCD's built-in `argoproj.io/Application` health check should keep `application-platform` Progressing until its children are Healthy, and the built-in `Subscription` check should keep `cass-operator-subscription` Progressing until the CSV is Succeeded. If observation shows premature Healthy on a wrapper, the fallback is a custom Lua check on `Application` (and possibly `Subscription`) added to `argocd-customizations.yaml`. Don't write the Lua speculatively — only when a real failure mode appears.
+- **Expect transient `OutOfSync/Failed` on first sync.** When `application-product` first reaches QE, Cassandra's CRD must already exist (planted by `application-platform`). Even with the health check, OLM reconciliation can lag; ArgoCD retries automatically. If retry backoff stretches the wait, force a re-fetch: `oc annotate application <app> argocd.argoproj.io/refresh=hard --overwrite`.
+- **`prune: true` everywhere means deletion cascades.** Removing `application-X.yaml` from a wrapper's folder deletes that child *and its workload* (via the resources-finalizer). Intentional — that's the GitOps semantics — but worth knowing for "I deleted a file to test something."
+- **Three is the cap.** Don't split product into e.g. "stateful" / "stateless" later. 4+ levels turns debugging into a multi-step traversal and the Codefresh research is explicit about avoiding it. ApplicationSet at the wrapper layer is the escape hatch if you outgrow the structure.
+- **`bootstrap/` semantics are narrowed.** Now means *only* "applied imperatively because GitOps can't (yet) manage it." Four files only: GitOps Operator subscription, ArgoCD customizations, the shared namespace (preconditional — see Architectural decisions), and the root Application seed. CLAUDE.md's file-layout section is updated to reflect this rule.
+- **Subscription-CSV gap.** ArgoCD says a `Subscription` is Synced once the CR exists, not once the CSV reaches `Succeeded`. ArgoCD's built-in `Subscription` health check should keep it Progressing until the CSV settles, which keeps the wrapper Application Progressing too. On clusters with slow OLM reconciliation this can take 1–2 min — not a failure, just patience.
 
 **Verification**
 
 ```bash
-oc get pods -n thatdot-openshift -l app=keycloak                 # Running, Ready 1/1
-oc get secret keycloak-tls -n thatdot-openshift                  # service-ca-minted cert exists
+# (Clean slate verification covered in Order of Operations step 1)
+
+# Single seed worked — five Applications visible
+oc get application -n openshift-gitops
+# Expect: root, application-platform, application-product, application-cassandra, application-quine-enterprise
+# All Synced + Healthy
+
+# Walk the nesting (no plugin needed)
+oc get application -n openshift-gitops \
+   -o custom-columns=NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status
+# (or, if the `argocd` CLI is installed + logged in: `argocd app get root --show-managed-resources`)
+
+# Operator + workloads landed in the right namespaces (unchanged from step 3)
+oc get csv -n thatdot-openshift                   # cass-operator-community.* — Succeeded
+oc get cassandradatacenter -n thatdot-openshift   # dc1 — Ready: True
+oc get pods -n thatdot-openshift                  # cass-operator + cassandra + QE all Running
+
+# `bootstrap/` is now minimal
+ls bootstrap/
+# argocd-customizations.yaml
+# gitops-operator-subscription.yaml
+# namespace-thatdot-openshift.yaml
+# root-application.yaml
+# (nothing else)
+
+# WIN CONDITION (same as step 3) — persistence survives QE pod restart
+ROUTE=$(oc get route quine-enterprise -n thatdot-openshift -o jsonpath='{.spec.host}')
+open "https://$ROUTE"
+# In QE UI:  CREATE (n:Test {tag: 'step-4'}) RETURN n
+oc delete pod -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise
+# Re-query in browser:  MATCH (n:Test {tag: 'step-4'}) RETURN n   — still there
+```
+
+**Done when** every Application reports `Synced + Healthy`, `bootstrap/` contains only the four chicken-and-egg files, and the persistence-after-restart test passes — proving the new bootstrap path produces a functionally identical cluster to the end of step 3.
+
+**README addendum** "Step 4: App-of-apps refactor" — explains the 3-level structure, the platform/product split, and the new minimal `bootstrap.sh`. Updates "What's here" to reflect the new directory layout.
+
+---
+
+### Step 5 — Add Keycloak with `quine-enterprise` realm
+
+**Goal:** Stand up Keycloak with the realm pre-configured, *before* wiring QE to it. Isolates Keycloak issues from OIDC-integration issues. First exercise of the post-step-4 "add a new platform component" workflow — drop a new Application into `manifests/platform/`, watch ArgoCD pick it up.
+
+**Architectural placement:** Keycloak is platform infra (identity, parallel to Cassandra-as-persistence). Lives in the platform layer of the app-of-apps tree, *not* product. Keycloak is consumed by QE the same way Cassandra is — both are dependencies, not differentiating workloads.
+
+**What's added**
+
+- `manifests/keycloak/` (leaf): Keycloak Deployment OR RHBK `Keycloak` CR (decide during the step — RHBK Operator from OperatorHub mirrors the cass-operator pattern; vanilla Helm/Deployment is simpler), PostgreSQL for Keycloak storage, realm import (Job running `keycloak-config-cli`, or `KeycloakRealmImport` CR for the operator path), Service annotated with `service.beta.openshift.io/serving-cert-secret-name` (so OpenShift mints the in-cluster TLS cert), Route exposing the admin console.
+- `manifests/platform/application-keycloak.yaml` — ArgoCD Application syncing `manifests/keycloak/`. Sibling of `application-cassandra` under the platform wrapper. `resources-finalizer` for cascade-delete consistency.
+- *(if RHBK Operator path)* `manifests/platform/rhbk-operator-subscription.yaml` — Subscription + OperatorGroup for Red Hat Build of Keycloak, OwnNamespace, sync-wave `"0"` alongside cass-operator-subscription. `application-keycloak.yaml` then takes sync-wave `"1"` so the CRDs exist before its CR is applied.
+- `manifests/platform/kustomization.yaml` — `resources:` updated to include the new file(s).
+- Realm config (port from `../opstools/keycloak/k8s/realm.json`):
+  - 1 client: `quine-enterprise`
+  - 6 roles: `superadmin`, `admin`, `architect`, `dataengineer`, `analyst`, `billing`
+  - 6 test users with matching passwords (placeholders ok in v1; rotate before any sharing)
+
+**Iteration ritual:** flip `targetRevision` on every Application CR (root + 2 wrappers + 2 existing leaves + the new `application-keycloak`) to `step-5-keycloak`, commit + push, ArgoCD reconciles. Same flip-back to `main` on PR finale (6 spots once Keycloak's Application is added).
+
+**Gotchas to know in advance**
+
+- **Sync-wave gating still applies.** If you take the RHBK Operator path, `application-keycloak` (wave 1) must wait for `rhbk-operator-subscription` (wave 0) to reach Healthy / CSV Succeeded — same pattern as cass-operator → application-cassandra. ArgoCD's built-in Subscription health check should gate this; if not, the fallback is a Lua check in `argocd-customizations.yaml` (see step 4 gotchas).
+- **Both managed-by labels.** Keycloak lands in `thatdot-openshift` (already labeled), so no new label work. If a future component needs its own namespace, that namespace must carry `argocd.argoproj.io/managed-by: openshift-gitops` AND be applied imperatively in `bootstrap.sh` (not via GitOps) — same chicken-and-egg as the existing `thatdot-openshift` namespace.
+
+**Verification**
+
+```bash
+oc get application keycloak -n openshift-gitops      # Synced + Healthy
+oc get pods -n thatdot-openshift -l app=keycloak     # Running, Ready 1/1
+oc get secret keycloak-tls -n thatdot-openshift      # service-ca-minted cert exists
 # Browser: hit the Keycloak Route, log in to admin console with the auto-generated admin secret
 # Confirm: 'quine-enterprise' realm visible, 6 users, 6 roles
 # Browser: log in as test user via the realm's account console
@@ -355,18 +492,23 @@ oc get secret keycloak-tls -n thatdot-openshift                  # service-ca-mi
 
 **Done when** the Keycloak admin console is reachable via HTTPS, the `quine-enterprise` realm has the expected users + roles, and a test user can log in via the realm's account UI.
 
-**README addendum** "Step 4: Keycloak with quine-enterprise realm."
+**README addendum** "Step 5: Keycloak with quine-enterprise realm."
 
 ---
 
-### Step 5 — Wire QE RBAC against Keycloak
+### Step 6 — Wire QE RBAC against Keycloak
 
 **Goal:** Connect QE's OIDC config to Keycloak; verify role-based access end-to-end.
 
+**Architectural placement:** Pure config layer — edits to existing files under `manifests/quine-enterprise/` (the leaf already managed by `application-quine-enterprise`). No new Application CRs, no new wrappers. ArgoCD picks up the changes automatically on commit + push.
+
 **What's added**
-- QE config: `quine.oidc.*` set to Keycloak's discovery URL, client ID, etc.
-- ConfigMap annotated with `service.beta.openshift.io/inject-cabundle: "true"` (OpenShift fills it with the service-ca CA bundle); mounted into the QE pod so the JVM truststore trusts Keycloak's service-ca cert
-- Keycloak client redirect URIs updated to include the QE Route URL
+- `manifests/quine-enterprise/values.yaml` — `quine.oidc.*` set to Keycloak's in-cluster discovery URL, client ID, claim mappings.
+- `manifests/quine-enterprise/` — ConfigMap annotated with `service.beta.openshift.io/inject-cabundle: "true"` (OpenShift fills it with the service-ca CA bundle); mounted into the QE pod so the JVM truststore trusts Keycloak's service-ca cert. Listed in `kustomization.yaml`'s `resources:`.
+- Keycloak client redirect URIs updated (in step 5's realm import) to include the QE Route URL.
+- *(possibly)* `manifests/quine-enterprise/patches/wait-for-keycloak.yaml` — second init container probing Keycloak's `/realms/quine-enterprise/.well-known/openid-configuration` if QE's OIDC bootstrap blocks at startup. Determine empirically; the complementary sync-wave + initContainer rule applies (CLAUDE.md Critical Rules / README Conventions).
+
+**Iteration ritual:** flip `targetRevision`s to `step-6-rbac`, commit + push, ArgoCD reconciles. Flip back to `main` on finale.
 
 **Verification**
 
@@ -383,7 +525,7 @@ oc logs -n thatdot-openshift -l app=quine-enterprise | grep -i "oidc\|claim"  # 
 - Ingest query + standing query running, persistence to Cassandra observable ✓
 - README walks another engineer through the same path ✓
 
-**README addendum** "Step 5: RBAC enabled" — final state. README is now the v1 deliverable.
+**README addendum** "Step 6: RBAC enabled" — final state. README is now the v1 deliverable.
 
 ---
 
@@ -403,8 +545,9 @@ Cross off as completed.
 - [x] **Step 1** — nginx via GitOps Operator + Route
 - [x] **Step 2** — Quine Enterprise standalone (no persistor / in-memory, no RBAC)
 - [x] **Step 3** — Cassandra added (cass-operator); QE persistor switched; persistence verified across pod restart
-- [ ] **Step 4** — Keycloak deployed with `quine-enterprise` realm
-- [ ] **Step 5** — QE RBAC wired against Keycloak
+- [ ] **Step 4** — App-of-apps refactor (clean-slate teardown + 3-level platform/product split; bootstrap.sh shrunk to seed-only)
+- [ ] **Step 5** — Keycloak deployed with `quine-enterprise` realm
+- [ ] **Step 6** — QE RBAC wired against Keycloak
 
 ### Wrap-up
 - [ ] README reads as a complete walk-through for a fresh engineer

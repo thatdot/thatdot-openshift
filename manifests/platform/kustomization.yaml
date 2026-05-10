@@ -1,0 +1,16 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Platform layer: operator subscriptions + the ArgoCD Applications for the
+# infra workloads they manage. Listed in logical order (Subscription before
+# the CR's Application) — Kustomize sorts by Kind anyway, but the listing
+# tells the next reader what to look at first.
+#
+# Internal sync-wave ordering (annotations on the resources themselves):
+#   wave 0: cass-operator-subscription   — install operator, wait for CSV Succeeded
+#   wave 1: application-cassandra        — applies the CassandraDatacenter CR
+#                                          (CRD is now installed; CR creation succeeds)
+resources:
+  - cass-operator-subscription.yaml
+  - application-cassandra.yaml

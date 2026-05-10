@@ -1,0 +1,13 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Product layer: ArgoCD Applications for differentiating workloads.
+# Today: Quine Enterprise. Future: Novelty.
+#
+# No internal sync-wave annotations — these are independent products. If a
+# product depends on a platform service (QE → Cassandra), that dependency is
+# handled at the pod level via initContainer (see manifests/quine-enterprise/
+# patches/wait-for-cassandra.yaml), not via sync-waves.
+resources:
+  - application-quine-enterprise.yaml

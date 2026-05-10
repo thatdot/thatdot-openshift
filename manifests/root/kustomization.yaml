@@ -1,0 +1,14 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The two children of root. Each is itself an ArgoCD Application that
+# fans out to its own kustomize root under manifests/{platform,product}/.
+#
+# Sync-wave ordering between them is set on the Application CRs themselves
+# (annotations in the files below) — wave 0 (platform) must be Synced + Healthy
+# before wave 1 (product) starts. ArgoCD's built-in Application health check
+# does the gating; we don't ship custom Lua for it.
+resources:
+  - application-platform.yaml
+  - application-product.yaml
