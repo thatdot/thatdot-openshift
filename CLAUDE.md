@@ -4,7 +4,7 @@
 
 Discovery + first implementation pass to deploy Quine Enterprise into Red Hat OpenShift, on a local OpenShift Local (formerly CRC) cluster. Tracking ticket: **[QU-2539](https://thatdot.atlassian.net/browse/QU-2539)**.
 
-The canonical document is **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)** — read it first. It has prerequisites, a 5-step walking-skeleton plan with verification per step, and a TL;DR checklist at the bottom that tracks progress.
+The canonical document is **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)** — read it first. It has prerequisites, a 6-step walking-skeleton plan with verification per step, and a TL;DR checklist at the bottom that tracks progress.
 
 ## Critical rules
 
@@ -13,7 +13,7 @@ The canonical document is **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)
 - **Manifest-driven, not UI-driven.** All cluster state — operator Subscriptions, Namespaces, ArgoCD Applications, RoleBindings, everything — is expressed as YAML in this repo and applied via `oc apply` (for `bootstrap/` items) or GitOps sync (for `manifests/`). The OperatorHub web console is a *discovery* tool only; never install something through clicks without committing the resulting manifest. This is what makes the eventual production deployment reproducible from a clone.
 - **Semantic naming, not step-numbered.** Files and directories are named by what they *are*, not by which step introduced them. `application-quine-enterprise.yaml`, `manifests/quine-enterprise/`, `manifests/cassandra/`, etc. Step numbers live in branch names (`step-2-basic-qe`) and the `IMPLEMENTATION_PLAN.md`, never in repo paths. (Step 1 used `step-1` paths; that was a v1 mistake corrected during step 2.)
 - **Walking-skeleton order matters.** Don't skip ahead from step N to step N+2. Each step's verification is the gate for the next.
-- **Cross-service runtime dependencies live at the pod level, not the sync-wave level.** ArgoCD sync-waves order *applies*, not *readiness* — a wave-N resource being "Synced" doesn't mean it's actually serving when wave-N+1 starts. Every long-running workload that depends on another service MUST ship an `initContainer` that probes the dependency at runtime and exits 0 only once it's reachable. Canonical example: `manifests/quine-enterprise/patches/wait-for-cassandra.yaml` (TCP connect via bash `</dev/tcp/HOST/PORT` against `quine-dc1-service:9042`). Bonus: this is also resilient to *subsequent* dep outages — every pod restart re-probes rather than crashlooping on connection-refused.
+- **Cross-service ordering uses sync-waves *and* `initContainer` probes — complementary layers, both required when there's a dependency.** Sync-waves (annotations on Application CRs and on resources within an Application) order what ArgoCD *applies* — Subscription before its CR-using Applications, platform wrapper before product wrapper, etc. They do *not* gate runtime readiness: ArgoCD reports "Healthy" before services are necessarily serving, and waves don't re-fire on later pod restarts. So every long-running workload that depends on another service MUST also ship an `initContainer` that probes the dep at runtime and exits 0 only once it's reachable. Canonical example: `manifests/quine-enterprise/patches/wait-for-cassandra.yaml` (TCP connect via bash `</dev/tcp/HOST/PORT` against `quine-dc1-service:9042`). The init pattern is also resilient to *subsequent* dep outages — every pod restart re-probes rather than crashlooping on connection-refused.
 
 ## Architectural decisions (locked in)
 
@@ -22,7 +22,7 @@ The canonical document is **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)
 | Local cluster | OpenShift Local (CRC) | Same OCP bits as a production OpenShift cluster |
 | GitOps engine | OpenShift GitOps Operator | Red Hat–native; the standard OpenShift GitOps path |
 | TLS source | OpenShift `service-ca` (in-cluster) + default Route edge cert | Zero-install; no PEM material in public repo |
-| Cassandra auth | Plaintext `PasswordAuthenticator` | Out of v1 scope; defer JWT auth |
+| Cassandra auth | None (`AllowAllAuthenticator`) | Out of v1 scope; defer JWT auth |
 | Out of v1 scope | Novelty, Kafka | Reduce surface area for discovery |
 
 ## Reference repositories

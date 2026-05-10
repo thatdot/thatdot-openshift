@@ -342,7 +342,7 @@ oc exec -n thatdot-openshift quine-dc1-default-sts-0 -c cassandra -- \
   - *Product* = differentiating workloads (QE today; Novelty if scope grows).
 - **Operator subscriptions become GitOps-managed.** `cass-operator-subscription.yaml` moves out of imperative `bootstrap/` into `manifests/platform/`. Chicken-and-egg things stay in `bootstrap/`: the GitOps Operator install, ArgoCD instance customizations, the shared `thatdot-openshift` namespace (preconditional — the OpenShift GitOps Operator needs the `argocd.argoproj.io/managed-by` label present *before* ArgoCD tries to sync into the namespace, otherwise the first wrapper sync races with the operator's RoleBinding provisioning; secrets also need the namespace to exist), and the root Application seed.
 - **Rely on built-in Application health.** Modern ArgoCD has a working built-in health check for the `argoproj.io/Application` kind: a wrapper Application reports Healthy when its children are Healthy. We start without any custom Application-level Lua. If observation shows wrappers reporting Healthy prematurely (or sync-wave gating not actually waiting for children), we add the Lua then — not before.
-- **Cross-service runtime dependencies still use init containers, not sync-waves.** The existing `wait-for-cassandra` init container in `manifests/quine-enterprise/patches/` is unchanged. Sync-waves at the Application level handle "things created in the right order"; init containers handle "things actually serving." See the new "Conventions" section in README.
+- **Sync-waves and init containers are complementary, not alternatives.** Sync-waves at the Application level (newly added in this step's tree) handle "things created in the right order" — wave 0 wrappers / Subscriptions before wave 1 wrappers / their CRs. The existing `wait-for-cassandra` init container in `manifests/quine-enterprise/patches/` (from step 3) handles "the dep is actually serving" — and continues to fire on every pod restart. Both are required for any cross-service dependency. See the Conventions section in README and the Critical Rules bullet in CLAUDE.md.
 
 **What's added**
 - `bootstrap/root-application.yaml` — single seed Application; `spec.source.path: manifests/root`; carries `resources-finalizer.argocd.argoproj.io` so deletion cascades through the whole tree.
@@ -457,22 +457,34 @@ oc delete pod -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise
 
 ### Step 5 — Add Keycloak with `quine-enterprise` realm
 
-**Goal:** Stand up Keycloak with the realm pre-configured, *before* wiring QE to it. Isolates Keycloak issues from OIDC-integration issues.
+**Goal:** Stand up Keycloak with the realm pre-configured, *before* wiring QE to it. Isolates Keycloak issues from OIDC-integration issues. First exercise of the post-step-4 "add a new platform component" workflow — drop a new Application into `manifests/platform/`, watch ArgoCD pick it up.
+
+**Architectural placement:** Keycloak is platform infra (identity, parallel to Cassandra-as-persistence). Lives in the platform layer of the app-of-apps tree, *not* product. Keycloak is consumed by QE the same way Cassandra is — both are dependencies, not differentiating workloads.
 
 **What's added**
-- `manifests/step-4/keycloak/`: Keycloak Deployment (or RHBK Operator from OperatorHub — decide during the step), PostgreSQL for Keycloak storage, realm import (Job using `keycloak-config-cli`, or `KeycloakRealmImport` CR if using the operator)
+
+- `manifests/keycloak/` (leaf): Keycloak Deployment OR RHBK `Keycloak` CR (decide during the step — RHBK Operator from OperatorHub mirrors the cass-operator pattern; vanilla Helm/Deployment is simpler), PostgreSQL for Keycloak storage, realm import (Job running `keycloak-config-cli`, or `KeycloakRealmImport` CR for the operator path), Service annotated with `service.beta.openshift.io/serving-cert-secret-name` (so OpenShift mints the in-cluster TLS cert), Route exposing the admin console.
+- `manifests/platform/application-keycloak.yaml` — ArgoCD Application syncing `manifests/keycloak/`. Sibling of `application-cassandra` under the platform wrapper. `resources-finalizer` for cascade-delete consistency.
+- *(if RHBK Operator path)* `manifests/platform/rhbk-operator-subscription.yaml` — Subscription + OperatorGroup for Red Hat Build of Keycloak, OwnNamespace, sync-wave `"0"` alongside cass-operator-subscription. `application-keycloak.yaml` then takes sync-wave `"1"` so the CRDs exist before its CR is applied.
+- `manifests/platform/kustomization.yaml` — `resources:` updated to include the new file(s).
 - Realm config (port from `../opstools/keycloak/k8s/realm.json`):
   - 1 client: `quine-enterprise`
   - 6 roles: `superadmin`, `admin`, `architect`, `dataengineer`, `analyst`, `billing`
   - 6 test users with matching passwords (placeholders ok in v1; rotate before any sharing)
-- Keycloak Service annotated with `service.beta.openshift.io/serving-cert-secret-name` so OpenShift mints the TLS cert
-- Route exposing the Keycloak admin console
+
+**Iteration ritual:** flip `targetRevision` on every Application CR (root + 2 wrappers + 2 existing leaves + the new `application-keycloak`) to `step-5-keycloak`, commit + push, ArgoCD reconciles. Same flip-back to `main` on PR finale (6 spots once Keycloak's Application is added).
+
+**Gotchas to know in advance**
+
+- **Sync-wave gating still applies.** If you take the RHBK Operator path, `application-keycloak` (wave 1) must wait for `rhbk-operator-subscription` (wave 0) to reach Healthy / CSV Succeeded — same pattern as cass-operator → application-cassandra. ArgoCD's built-in Subscription health check should gate this; if not, the fallback is a Lua check in `argocd-customizations.yaml` (see step 4 gotchas).
+- **Both managed-by labels.** Keycloak lands in `thatdot-openshift` (already labeled), so no new label work. If a future component needs its own namespace, that namespace must carry `argocd.argoproj.io/managed-by: openshift-gitops` AND be applied imperatively in `bootstrap.sh` (not via GitOps) — same chicken-and-egg as the existing `thatdot-openshift` namespace.
 
 **Verification**
 
 ```bash
-oc get pods -n thatdot-openshift -l app=keycloak                 # Running, Ready 1/1
-oc get secret keycloak-tls -n thatdot-openshift                  # service-ca-minted cert exists
+oc get application keycloak -n openshift-gitops      # Synced + Healthy
+oc get pods -n thatdot-openshift -l app=keycloak     # Running, Ready 1/1
+oc get secret keycloak-tls -n thatdot-openshift      # service-ca-minted cert exists
 # Browser: hit the Keycloak Route, log in to admin console with the auto-generated admin secret
 # Confirm: 'quine-enterprise' realm visible, 6 users, 6 roles
 # Browser: log in as test user via the realm's account console
@@ -488,10 +500,15 @@ oc get secret keycloak-tls -n thatdot-openshift                  # service-ca-mi
 
 **Goal:** Connect QE's OIDC config to Keycloak; verify role-based access end-to-end.
 
+**Architectural placement:** Pure config layer — edits to existing files under `manifests/quine-enterprise/` (the leaf already managed by `application-quine-enterprise`). No new Application CRs, no new wrappers. ArgoCD picks up the changes automatically on commit + push.
+
 **What's added**
-- QE config: `quine.oidc.*` set to Keycloak's discovery URL, client ID, etc.
-- ConfigMap annotated with `service.beta.openshift.io/inject-cabundle: "true"` (OpenShift fills it with the service-ca CA bundle); mounted into the QE pod so the JVM truststore trusts Keycloak's service-ca cert
-- Keycloak client redirect URIs updated to include the QE Route URL
+- `manifests/quine-enterprise/values.yaml` — `quine.oidc.*` set to Keycloak's in-cluster discovery URL, client ID, claim mappings.
+- `manifests/quine-enterprise/` — ConfigMap annotated with `service.beta.openshift.io/inject-cabundle: "true"` (OpenShift fills it with the service-ca CA bundle); mounted into the QE pod so the JVM truststore trusts Keycloak's service-ca cert. Listed in `kustomization.yaml`'s `resources:`.
+- Keycloak client redirect URIs updated (in step 5's realm import) to include the QE Route URL.
+- *(possibly)* `manifests/quine-enterprise/patches/wait-for-keycloak.yaml` — second init container probing Keycloak's `/realms/quine-enterprise/.well-known/openid-configuration` if QE's OIDC bootstrap blocks at startup. Determine empirically; the complementary sync-wave + initContainer rule applies (CLAUDE.md Critical Rules / README Conventions).
+
+**Iteration ritual:** flip `targetRevision`s to `step-6-rbac`, commit + push, ArgoCD reconciles. Flip back to `main` on finale.
 
 **Verification**
 

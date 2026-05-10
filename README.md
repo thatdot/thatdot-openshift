@@ -30,7 +30,7 @@ Single-node [OpenShift Local](https://developers.redhat.com/products/openshift-l
 
 ## Conventions
 
-**Cross-service runtime dependencies use `initContainer` probes, not ArgoCD sync-waves.** Sync-waves order *applies*, not *readiness* — a "Synced" resource may not yet be serving traffic. Every long-running workload that depends on another service ships an init container that probes the dependency and exits 0 only once it's reachable. Canonical example: `manifests/quine-enterprise/patches/wait-for-cassandra.yaml` (TCP connect via bash `</dev/tcp/HOST/PORT`). Side benefit: every pod restart re-probes, so a transient dep outage doesn't trigger a crashloop on connection-refused.
+**Cross-service ordering uses ArgoCD sync-waves *and* `initContainer` probes — complementary layers, not alternatives.** Sync-waves order what ArgoCD *applies* (e.g., cass-operator Subscription before its CR-using Application; the platform wrapper before the product wrapper). InitContainers gate *runtime startup* on every pod start (e.g., `wait-for-cassandra` blocks QE until CQL is reachable). Either alone is insufficient: ArgoCD reports "Synced + Healthy" before services are fully serving and doesn't re-fire on later pod restarts; meanwhile a CR can't be applied before its CRD exists. Use both. Canonical init container: `manifests/quine-enterprise/patches/wait-for-cassandra.yaml` (TCP connect via bash `</dev/tcp/HOST/PORT`).
 
 ## Public-repo notice
 
@@ -71,9 +71,9 @@ export THATDOT_REGISTRY_PASSWORD="..."
 After ArgoCD reports `Synced + Healthy`:
 
 ```bash
-oc get application -n openshift-gitops              # quine-enterprise → Synced + Healthy
+oc get application -n openshift-gitops              # root + 4 children → Synced + Healthy
 ROUTE=$(oc get route quine-enterprise -n thatdot-openshift -o jsonpath='{.spec.host}')
-open "https://$ROUTE"                               # browser: QE landing page (no auth in step 2)
+open "https://$ROUTE"                               # browser: QE landing page (no RBAC yet — that's step 6)
 ```
 
 ## Steps so far
@@ -128,7 +128,7 @@ open "https://$ROUTE"                               # browser: QE landing page (
 2. **`CassandraDatacenter.spec.serviceAccount` is effectively immutable post-creation.** cass-operator's validating webhook rejects updates: `attempted to change serviceAccount`. We initially tried directing the operator to a dedicated `cassandra-sa`, hit this, pivoted to binding the `default` SA instead. If you ever want a dedicated SA, set it on the CR's *first* apply or delete-and-recreate.
 3. **cass-operator's default is `AllowAllAuthenticator`, not auth-enabled.** The auto-created `<clusterName>-superuser` Secret is provisioned defensively but isn't enforced unless you set `cassandra-yaml.authenticator: PasswordAuthenticator` on the CR. Mismatched QE auth config (`plaintextAuth.enabled: true` against a no-auth cluster) produces noisy WARN lines but functionally works. We turned QE's plaintextAuth off to match.
 4. **No built-in ArgoCD health check for `CassandraDatacenter`.** Without the custom Lua check we registered, ArgoCD would report Healthy immediately on CR creation, long before Cassandra is actually serving. The check watches `cassandraOperatorProgress: Ready` plus the `Ready` condition.
-5. **Init container pattern beats sync waves for cross-Application ordering.** QE depends on Cassandra being up. We considered ArgoCD app-of-apps + sync waves; chose a pod-level init container instead. Simpler, doesn't require restructuring, and resilient to pod restarts (every QE pod start re-checks Cassandra reachability).
+5. **Init container at step 3, sync-waves added in step 4.** QE depends on Cassandra being up. At step 3 we considered app-of-apps + sync-waves but chose a pod-level init container instead — simpler, no restructuring, resilient to pod restarts. Step 4 then layered sync-waves on top via the app-of-apps refactor; the two are complementary (sync-waves order applies, init containers gate readiness). See the Conventions section.
 6. **ArgoCD sync backoff after repeated failures.** When sync fails several times in a row, ArgoCD's auto-retry backs off — could be 10+ min before it tries again. After pushing a fix, use `oc annotate application <app> argocd.argoproj.io/refresh=hard --overwrite` to force an immediate re-fetch from git.
 
 ### Step 4 — App-of-apps refactor (platform/product split)
