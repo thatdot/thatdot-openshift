@@ -2,7 +2,7 @@
 
 Reference deployment of [Quine Enterprise](https://www.thatdot.com/quine-enterprise) onto Red Hat OpenShift, with Cassandra as its persistor and Keycloak for OIDC-based RBAC.
 
-> **Status:** step 3 of 6 complete — Quine Enterprise persisting through Cassandra (no RBAC yet). Step 4 (app-of-apps refactor) in progress on branch `app-of-apps`. See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) for progress.
+> **Status:** step 4 of 6 complete — Quine Enterprise + Cassandra deployed via a 3-level app-of-apps GitOps cascade; `bootstrap.sh` shrunk to seed-only (no RBAC yet). See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) for progress.
 
 ## What's here
 

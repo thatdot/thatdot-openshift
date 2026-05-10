@@ -545,7 +545,7 @@ Cross off as completed.
 - [x] **Step 1** — nginx via GitOps Operator + Route
 - [x] **Step 2** — Quine Enterprise standalone (no persistor / in-memory, no RBAC)
 - [x] **Step 3** — Cassandra added (cass-operator); QE persistor switched; persistence verified across pod restart
-- [ ] **Step 4** — App-of-apps refactor (clean-slate teardown + 3-level platform/product split; bootstrap.sh shrunk to seed-only)
+- [x] **Step 4** — App-of-apps refactor (clean-slate teardown + 3-level platform/product split; bootstrap.sh shrunk to seed-only)
 - [ ] **Step 5** — Keycloak deployed with `quine-enterprise` realm
 - [ ] **Step 6** — QE RBAC wired against Keycloak
 
