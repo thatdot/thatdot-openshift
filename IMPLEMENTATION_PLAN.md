@@ -472,7 +472,7 @@ oc delete pod -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise
   - 6 roles: `superadmin`, `admin`, `architect`, `dataengineer`, `analyst`, `billing`
   - 6 test users with matching passwords (placeholders ok in v1; rotate before any sharing)
 
-**Iteration ritual:** flip `targetRevision` on every Application CR (root + 2 wrappers + 2 existing leaves + the new `application-keycloak`) to `step-5-keycloak`, commit + push, ArgoCD reconciles. Same flip-back to `main` on PR finale (6 spots once Keycloak's Application is added).
+**Iteration ritual:** Flip `targetRevision` only on the chain from `root` down to each modified leaf — not every Application. The rule: any Application whose `source.path` content has changed needs to be on the iteration branch, *and* every ancestor up to root needs to be on the branch too (because the ancestor has to see the modified Application file containing the targetRevision change). For step 5, only `manifests/keycloak/` is a new leaf, so the chain is `root` → `application-platform` → `application-keycloak` — 3 spots (the new `application-keycloak.yaml` is born on the branch; root and application-platform get flipped). The three unchanged Applications — `application-product`, `application-cassandra`, `application-quine-enterprise` — stay on `main` throughout. Same chain flips back to `main` on PR finale.
 
 **Gotchas to know in advance**
 
@@ -508,7 +508,7 @@ oc get secret keycloak-tls -n thatdot-openshift      # service-ca-minted cert ex
 - Keycloak client redirect URIs updated (in step 5's realm import) to include the QE Route URL.
 - *(possibly)* `manifests/quine-enterprise/patches/wait-for-keycloak.yaml` — second init container probing Keycloak's `/realms/quine-enterprise/.well-known/openid-configuration` if QE's OIDC bootstrap blocks at startup. Determine empirically; the complementary sync-wave + initContainer rule applies (CLAUDE.md Critical Rules / README Conventions).
 
-**Iteration ritual:** flip `targetRevision`s to `step-6-rbac`, commit + push, ArgoCD reconciles. Flip back to `main` on finale.
+**Iteration ritual:** Same dependency-chain rule as step 5 (see step 5's iteration ritual for the underlying logic). Step 6 modifies *two* leaves — `manifests/quine-enterprise/` (new OIDC config + ConfigMap + possible init container) and `manifests/keycloak/` (client redirect URIs added to the realm import). Both chains converge at root, so the on-branch set is: `root`, `application-platform`, `application-product`, `application-keycloak`, `application-quine-enterprise` — 5 spots. Only `application-cassandra` stays on `main`. Same set flips back on PR finale.
 
 **Verification**
 
