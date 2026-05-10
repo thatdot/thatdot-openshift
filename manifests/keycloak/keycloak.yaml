@@ -1,0 +1,60 @@
+# Keycloak instance — RHBK (Red Hat Build of Keycloak).
+#
+# Topology (the "edge-terminated Route, single Route URL as Keycloak hostname"
+# decision from step 5):
+#
+#   Browser ──HTTPS (cluster wildcard cert)──> OpenShift router ──HTTP──> Keycloak pod
+#
+# `http.enabled: true` makes Keycloak listen on plain HTTP internally; OpenShift
+# Route handles TLS termination at the edge with the cluster's default wildcard
+# cert. `proxy.headers: xforwarded` tells Keycloak to trust the router's
+# X-Forwarded-Proto: https header, so the discovery doc + JWT iss claim emit
+# `https://...` URLs even though Keycloak's process saw HTTP internally.
+#
+# `hostname.hostname` MUST match what the browser uses (the Route URL). On CRC
+# the apps domain is deterministic — Route `<name>-<ns>.apps-crc.testing`.
+# When porting to a real cluster, swap the suffix for that cluster's
+# `*.apps.<cluster>.<domain>`.
+#
+# `ingress.enabled: false`: we own the Route (manifests/keycloak/route.yaml).
+# Letting the operator manage Ingress would mint a Route with edge termination
+# defaults that may not match — explicit is clearer.
+#
+# DB credentials come from the Secret CNPG generates for `keycloak-postgres`
+# (see postgres-cluster.yaml). Keys: `username`, `password`.
+#
+# sync-wave "2": Wave-1 Postgres Cluster must be reconciled for the
+# `keycloak-postgres-app` Secret to exist. Without it, Keycloak's reconciler
+# would loop on missing secret refs.
+---
+apiVersion: k8s.keycloak.org/v2beta1
+kind: Keycloak
+metadata:
+  name: keycloak
+  namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  instances: 1
+  db:
+    vendor: postgres
+    host: keycloak-postgres-rw   # CNPG primary-writes Service for the keycloak-postgres Cluster
+    port: 5432
+    database: keycloak
+    usernameSecret:
+      name: keycloak-postgres-app
+      key: username
+    passwordSecret:
+      name: keycloak-postgres-app
+      key: password
+  http:
+    # Plain HTTP inside the pod; OpenShift Route terminates TLS at the edge.
+    httpEnabled: true
+  hostname:
+    # Full Route URL (deterministic on CRC). Must match `host:` on Route resource.
+    hostname: https://keycloak-thatdot-openshift.apps-crc.testing
+    strict: false
+  proxy:
+    headers: xforwarded   # Trust X-Forwarded-* from OpenShift router
+  ingress:
+    enabled: false        # We provide the Route ourselves (route.yaml)

@@ -17,6 +17,12 @@ kind: CassandraDatacenter
 metadata:
   name: dc1
   namespace: thatdot-openshift
+  annotations:
+    # Wave 1 — applied after wave 0 (operator subscription + RoleBinding) is
+    # Synced. ArgoCD's built-in Subscription health check keeps wave 0
+    # Progressing until the CSV is Succeeded, so cass-operator's CRDs exist
+    # by the time this CR is created.
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   clusterName: quine
   serverType: cassandra

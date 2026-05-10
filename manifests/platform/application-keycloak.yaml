@@ -1,0 +1,42 @@
+# ArgoCD Application — Keycloak stack (RHBK + CNPG + Postgres + Keycloak + realm).
+# Synced by application-platform (the parent wrapper).
+#
+# Owns the entire Keycloak stack in one Application boundary — operator
+# subscriptions, the Postgres Cluster CR, the Keycloak CR, the Route, and the
+# realm import all live in manifests/keycloak/ and are wave-ordered there.
+# See manifests/keycloak/kustomization.yaml for the rationale.
+#
+# sync-wave "1" inside manifests/platform/: applies in parallel with
+# application-cassandra. Each leaf installs its own operators (wave 0 inside
+# the leaf) before applying CRs (wave 1+).
+#
+# Iteration knob: `spec.source.targetRevision`.
+#   - During iteration:  the active branch (e.g., `add-configured-keycloak`)
+#   - After PR merge:    flip to `main` as the last commit on the PR.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keycloak
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    # Cascade-delete synced resources when this Application is deleted. This is
+    # what makes `oc delete application keycloak` the natural full-stack reset.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/thatdot/thatdot-openshift
+    path: manifests/keycloak
+    targetRevision: add-configured-keycloak
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: thatdot-openshift
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - ServerSideApply=true

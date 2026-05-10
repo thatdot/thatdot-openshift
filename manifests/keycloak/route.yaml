@@ -1,0 +1,37 @@
+# OpenShift Route exposing Keycloak via edge-terminated HTTPS.
+#
+# Edge termination: OpenShift router presents the cluster's default wildcard
+# cert to browsers; traffic from router to pod is plain HTTP. Combined with
+# Keycloak's `http.enabled: true` and `proxy.headers: xforwarded`, this is
+# the simplest correct config for a Keycloak instance behind an OpenShift Route.
+#
+# Why explicit `spec.host:` (vs letting OpenShift auto-assign):
+#   The Keycloak CR's `hostname.hostname` MUST match what the browser sees,
+#   so the Route's hostname is part of the contract. Letting OpenShift derive
+#   the host from `<name>-<ns>.<apps-domain>` works, but pinning it explicitly
+#   keeps both ends of the contract in one repo.
+#
+# Service target: RHBK operator creates a Service named `<keycloak-cr-name>-service`
+# (so: `keycloak-service`). Port 8080 (default plain-HTTP port when
+# `http.enabled: true`).
+#
+# sync-wave "2": Pairs with the Keycloak CR. ArgoCD's Route health is built-in,
+# so wave 3 (realm import) waits for this to settle before applying.
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: keycloak
+  namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  host: keycloak-thatdot-openshift.apps-crc.testing
+  to:
+    kind: Service
+    name: keycloak-service
+  port:
+    targetPort: http   # Service exposes port 8080 under named port `http`
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

@@ -232,6 +232,8 @@ oc delete pod -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise
 
 ### Step 3 — Add Cassandra (operator-managed); switch QE persistor
 
+> **Note on layout drift:** Step 5 refactored `cass-operator-subscription.yaml` from `manifests/platform/` (where step 3 put it) into `manifests/cassandra/`, aligning Cassandra with the single-Application-boundary pattern adopted for the Keycloak stack. The narrative below preserves step 3's *original* layout for historical context — the *current* directory tree is documented in CLAUDE.md and in step 5's Layout block.
+
 **Goal:** Verify a stateful workload runs under `restricted-v2` SCC, and QE successfully writes through to Cassandra. The **win condition**: a Cypher write *survives a QE pod restart*, proving the persistor is durable rather than in-memory.
 
 **Architectural choice — k8ssandra cass-operator over Bitnami chart:**
@@ -331,6 +333,8 @@ oc exec -n thatdot-openshift quine-dc1-default-sts-0 -c cassandra -- \
 ---
 
 ### Step 4 — App-of-apps refactor (platform/product split)
+
+> **Note on layout drift:** Step 5 moved `cass-operator-subscription.yaml` from `manifests/platform/` (described below) into `manifests/cassandra/` to unify with the Keycloak-stack pattern. Step 4's narrative below reflects the layout *as built at step 4*; CLAUDE.md + step 5 document the current state.
 
 **Goal:** Shrink `bootstrap.sh` to a minimal seed and let GitOps own the rest. Reorganize manifests into a 3-level app-of-apps hierarchy (`root → platform / product → leaf`) so adding a new operator or workload becomes "edit one folder, commit" rather than "edit bash + re-run on every cluster." Foundational refactor *before* Keycloak — easier to do this with one workload + one infra dep than with four.
 
@@ -457,42 +461,217 @@ oc delete pod -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise
 
 ### Step 5 — Add Keycloak with `quine-enterprise` realm
 
-**Goal:** Stand up Keycloak with the realm pre-configured, *before* wiring QE to it. Isolates Keycloak issues from OIDC-integration issues. First exercise of the post-step-4 "add a new platform component" workflow — drop a new Application into `manifests/platform/`, watch ArgoCD pick it up.
+**Goal:** Stand up Keycloak (Red Hat Build of Keycloak, "RHBK") with the realm pre-configured, *before* wiring QE to it. Isolates Keycloak issues from OIDC-integration issues. First exercise of the post-step-4 "add a new platform component" workflow — drop a new Application into `manifests/platform/`, watch ArgoCD pick it up.
 
 **Architectural placement:** Keycloak is platform infra (identity, parallel to Cassandra-as-persistence). Lives in the platform layer of the app-of-apps tree, *not* product. Keycloak is consumed by QE the same way Cassandra is — both are dependencies, not differentiating workloads.
 
-**What's added**
+**Architectural decisions baked in**
 
-- `manifests/keycloak/` (leaf): Keycloak Deployment OR RHBK `Keycloak` CR (decide during the step — RHBK Operator from OperatorHub mirrors the cass-operator pattern; vanilla Helm/Deployment is simpler), PostgreSQL for Keycloak storage, realm import (Job running `keycloak-config-cli`, or `KeycloakRealmImport` CR for the operator path), Service annotated with `service.beta.openshift.io/serving-cert-secret-name` (so OpenShift mints the in-cluster TLS cert), Route exposing the admin console.
+- **RHBK Operator over upstream Keycloak or Helm.** OpenShift-native lane: Subscription from OperatorHub (`redhat-operators` catalog, package `rhbk-operator`), CRDs `Keycloak` + `KeycloakRealmImport` on `k8s.keycloak.org/v2beta1`. Same install idiom as cass-operator (Subscription + OperatorGroup, OwnNamespace, sync-wave `"0"`). Reuses the existing `thatdot-openshift-operators` OperatorGroup (set up in step 3 and explicitly intended to host future namespace-scoped operators).
+- **CloudNativePG (CNPG) operator for Postgres backing store.** Bare Deployment+PVC was on the table; CNPG wins on lines-of-config (~15-line `Cluster` CR vs ~80 lines for hand-rolled Postgres), pattern consistency (third operator + leaf, matching cass-operator + RHBK), and credential management (CNPG auto-creates `<cluster>-app` Secret with `username`/`password` keys that Keycloak's `db.usernameSecret` reads directly). Subscription from `certified-operators` catalog, package `cloud-native-postgresql`. OwnNamespace install in `thatdot-openshift-operators` (verify the CSV declares OwnNamespace support — fall back to AllNamespaces in `openshift-operators` if not, accept the asymmetry).
+- **Edge-terminated Route, single Route URL as Keycloak hostname.** `Keycloak.spec.hostname.hostname` = the public Route URL (with `https://`). Browser → router (cluster wildcard cert) → plain HTTP to Keycloak pod. `proxy.headers: xforwarded` so Keycloak generates HTTPS URLs in discovery doc despite seeing HTTP internally. This *will* expose the classic Keycloak TLS-at-ingress gotcha — we configure through it on purpose so the mental model is built before step 6 needs it.
+- **Operator-generated client secrets + temporary-password test users.** Public-repo rule: no static credentials in git. Client `secret:` fields left unspecified in the realm import → Keycloak auto-generates; retrieval is `oc exec` + `kcadm.sh` (or admin REST API). Test-user passwords are placeholders with `temporary: true` — Keycloak forces a password reset on first login, so the committed placeholder is useless after first use.
+- **Two flavors of identities in the realm: 6 browser/interactive users + 6 service-account CLI clients.** Both shapes are needed for QE. Interactive users (`admin1`...`billing1`) drive the browser OIDC flow tested in step 6. Service-account clients (`qe-cli-superadmin`...`qe-cli-billing`) exist for CLI/machine-to-machine flows — each is a confidential OIDC client with `serviceAccountsEnabled: true`, `standardFlowEnabled: false`, `directAccessGrantsEnabled: false`, and the matching client role pre-mapped onto its built-in service-account user. A consumer (a CLI, a script, a CI job) does the `client_credentials` grant against `qe-cli-<role>` and gets a bearer JWT with the corresponding role claim. Same `secret:`-omitted pattern as the interactive client: all 7 client secrets are operator-generated, retrieved out-of-band.
+- **No QE redirect URI in step 5's realm.** That's step 6's job. Step 5's realm boots cold without knowing QE exists; step 6 adds QE's Route URL to the client's `redirectUris`.
+- **Single-Application boundary for every platform stack — including a step-3 cleanup pass on Cassandra.** Each platform-layer stack (operators + workload CRs) is owned by *one* Application, ordered by internal sync-waves. The whole Keycloak stack — both operators, Postgres, Keycloak, realm — lives under `application-keycloak`. Same shape now applies to Cassandra: `cass-operator-subscription.yaml` moves from `manifests/platform/` into `manifests/cassandra/`. Motivated by (a) `KeycloakRealmImport`'s fire-once semantics making `oc delete application keycloak` the natural debug loop, and (b) pattern consistency — having one platform stack break the rule for "historical reasons" is the kind of asymmetry that compounds over time. Step 3's original layout was right *at the time*; step 5 promotes the pattern to platform-wide and aligns Cassandra in one motion. See "Layout" and "Reset granularities" below.
+
+**Layout**
+
+```
+manifests/platform/                # The wrapper Application (application-platform)
+├── kustomization.yaml             # only Application CRs, no operator subs
+├── application-cassandra.yaml        (wave 1)
+└── application-keycloak.yaml         (wave 1 — NEW)
+
+manifests/cassandra/               # LEAF synced by application-cassandra
+├── kustomization.yaml
+├── cass-operator-subscription.yaml   (wave 0 — MOVED from manifests/platform/)
+├── serviceaccount.yaml               (wave 0 — anyuid RoleBinding)
+└── cassandradatacenter.yaml          (wave 1)
+
+manifests/keycloak/                # LEAF synced by application-keycloak (NEW)
+├── kustomization.yaml
+├── rhbk-operator-subscription.yaml   (wave 0)
+├── cnpg-operator-subscription.yaml   (wave 0)
+├── postgres-cluster.yaml             (wave 1)
+├── keycloak.yaml                     (wave 2)
+├── route.yaml                        (wave 2)
+└── keycloak-realm-import.yaml        (wave 3)
+```
+
+Sync-waves *inside* a leaf are scoped to that leaf's Application — `0/1/2/3` are independent of the outer `application-platform → application-cassandra/keycloak` ordering. Both leaves follow the same shape: wave 0 installs the operator(s), wave 1+ applies the CRs the operators reconcile.
+
+**What's added (and refactored)**
+
+Cassandra refactor (moves only — content unchanged):
+- `manifests/cassandra/cass-operator-subscription.yaml` — MOVED from `manifests/platform/`. Gains `argocd.argoproj.io/sync-wave: "0"` annotation.
+- `manifests/cassandra/serviceaccount.yaml` — gains `sync-wave: "0"` annotation.
+- `manifests/cassandra/cassandradatacenter.yaml` — gains `sync-wave: "1"` annotation.
+- `manifests/cassandra/kustomization.yaml` — `resources:` adds `cass-operator-subscription.yaml`.
+- `manifests/platform/kustomization.yaml` — `resources:` drops `cass-operator-subscription.yaml`.
+
+Keycloak addition (the actual new work):
 - `manifests/platform/application-keycloak.yaml` — ArgoCD Application syncing `manifests/keycloak/`. Sibling of `application-cassandra` under the platform wrapper. `resources-finalizer` for cascade-delete consistency.
-- *(if RHBK Operator path)* `manifests/platform/rhbk-operator-subscription.yaml` — Subscription + OperatorGroup for Red Hat Build of Keycloak, OwnNamespace, sync-wave `"0"` alongside cass-operator-subscription. `application-keycloak.yaml` then takes sync-wave `"1"` so the CRDs exist before its CR is applied.
-- `manifests/platform/kustomization.yaml` — `resources:` updated to include the new file(s).
-- Realm config (port from `../opstools/keycloak/k8s/realm.json`):
-  - 1 client: `quine-enterprise`
-  - 6 roles: `superadmin`, `admin`, `architect`, `dataengineer`, `analyst`, `billing`
-  - 6 test users with matching passwords (placeholders ok in v1; rotate before any sharing)
+- `manifests/platform/kustomization.yaml` — `resources:` updated to add `application-keycloak.yaml`. (After the Cassandra refactor + Keycloak add, `manifests/platform/` contains only Application CRs — no operator subs at the wrapper layer.)
+- `manifests/keycloak/` (leaf, new):
+  - `kustomization.yaml` — `resources:` lists every file below.
+  - `rhbk-operator-subscription.yaml` — Subscription to `rhbk-operator` (no new OperatorGroup; reuses `thatdot-openshift-operators` from step 3). `argocd.argoproj.io/sync-wave: "0"`.
+  - `cnpg-operator-subscription.yaml` — Subscription to `cloud-native-postgresql`. `sync-wave: "0"`. OwnNamespace if the CSV supports it, else AllNamespaces in `openshift-operators` (decision flagged in Gotchas).
+  - `postgres-cluster.yaml` — CNPG `Cluster` CR (`cnpg.io/v1`), name `keycloak-postgres`, `instances: 1`, `storage.size: 2Gi`, `bootstrap.initdb.{database: keycloak, owner: keycloak}`. Operator generates the `keycloak-postgres-app` Secret. `sync-wave: "1"`.
+  - `keycloak.yaml` — RHBK `Keycloak` CR. Key fields: `instances: 1`, `db.{vendor: postgres, host: keycloak-postgres-rw, port: 5432, database: keycloak, usernameSecret + passwordSecret pointing at keycloak-postgres-app}`, `hostname.hostname: https://<route-url>`, `proxy.headers: xforwarded`, `http.enabled: true`, `ingress.enabled: false` (we own the Route). `sync-wave: "2"`.
+  - `route.yaml` — edge-terminated Route exposing the Keycloak Service on port 8080. `host:` left unset so OpenShift assigns `keycloak-thatdot-openshift.apps-crc.testing`. The Route URL has to be computed *before* `keycloak.yaml`'s `hostname.hostname` is set — see Order of Operations. `sync-wave: "2"`.
+  - `keycloak-realm-import.yaml` — `KeycloakRealmImport` CR. `sync-wave: "3"`. Realm `quine-enterprise`, ported from `../opstools/keycloak/k8s/realm.json`. Contents:
+    - **1 interactive OIDC client `quine-enterprise-client`** (matches opstools naming) — `protocolMappers` for `roles` (client-role mapper) + `audience` (audience mapper), `standardFlowEnabled: true`, `directAccessGrantsEnabled: true`, `secret:` omitted.
+    - **6 client roles** on `quine-enterprise-client`: `superadmin`, `admin`, `architect`, `dataengineer`, `analyst`, `billing`.
+    - **6 interactive users** `admin1`...`billing1` — placeholder passwords with `temporary: true`, each pre-assigned the matching client role.
+    - **6 service-account CLI clients** `qe-cli-superadmin`...`qe-cli-billing` — `serviceAccountsEnabled: true`, `standardFlowEnabled: false`, `directAccessGrantsEnabled: false`, `publicClient: false`, `secret:` omitted. Each carries a `serviceAccountClientRoles` block mapping the corresponding `quine-enterprise-client` client role onto its built-in service-account user, so a `client_credentials` grant produces a JWT with the right role claim.
+    - **No QE redirect URIs yet** on `quine-enterprise-client` — step 6.
 
-**Iteration ritual:** Flip `targetRevision` only on the chain from `root` down to each modified leaf — not every Application. The rule: any Application whose `source.path` content has changed needs to be on the iteration branch, *and* every ancestor up to root needs to be on the branch too (because the ancestor has to see the modified Application file containing the targetRevision change). For step 5, only `manifests/keycloak/` is a new leaf, so the chain is `root` → `application-platform` → `application-keycloak` — 3 spots (the new `application-keycloak.yaml` is born on the branch; root and application-platform get flipped). The three unchanged Applications — `application-product`, `application-cassandra`, `application-quine-enterprise` — stay on `main` throughout. Same chain flips back to `main` on PR finale.
+**Iteration ritual:** Flip `targetRevision` only on the chain from `root` down to each modified leaf. Step 5 modifies *two* leaves — `manifests/cassandra/` (Subscription moved in, sync-wave annotations added) and `manifests/keycloak/` (new). Both chains converge at root, so the on-branch set is `root` → `application-platform` → `application-cassandra` + `application-keycloak` — 4 spots. The two unchanged Applications — `application-product`, `application-quine-enterprise` — stay on `main` throughout. Same 4 spots flip back to `main` on PR finale.
+
+**Order of operations**
+
+Clean-slate path — same shape as step 4. Step 5 introduces the platform-wide single-Application-boundary pattern, refactors Cassandra to match, and adds Keycloak. Verifying the whole cascade from absolute zero is the strongest test that the new pattern holds end-to-end. CRC is already deleted; proceed from `crc start`.
+
+1. **Cluster boot.**
+   ```bash
+   crc start --pull-secret-file ~/Downloads/pull-secret.txt
+   eval "$(crc oc-env)"
+   oc login -u kubeadmin -p <pw> https://api.crc.testing:6443      # `crc console --credentials` for pw
+   ./scripts/trust-crc-ca.sh                                        # CRC regenerates its CA on each fresh deploy
+   ```
+   Verify clean before proceeding:
+   ```bash
+   oc get ns | grep -E 'thatdot|gitops|operators'   # only kube-* / openshift-* defaults; no openshift-gitops
+   oc get crd | grep -E 'cassandra|keycloak|postgresql|argo'  # empty
+   ```
+
+2. **(Prereq, on `step-5-keycloak` branch)** Env vars unchanged from step 4 — same `QE_LICENSE_KEY`, `THATDOT_REGISTRY_USERNAME`, `THATDOT_REGISTRY_PASSWORD`. The Keycloak admin password is operator-generated and stored in `keycloak-initial-admin` — looked up post-deploy, never pre-set.
+
+3. **Compute the Route URL ahead of time** so `Keycloak.spec.hostname.hostname` can be written into the manifest before first apply. On CRC, the apps domain is deterministic: `apps-crc.testing`. Route hostname follows the OpenShift pattern `<route-name>-<namespace>.apps-crc.testing` → `keycloak-thatdot-openshift.apps-crc.testing`. Hardcode this into `keycloak.yaml`'s `hostname.hostname: https://keycloak-thatdot-openshift.apps-crc.testing`.
+
+4. *(Already done by Claude when files are written)* Cassandra refactor + Keycloak addition: files moved/added under `manifests/cassandra/` and `manifests/keycloak/`, `manifests/platform/kustomization.yaml` updated, branch-flips on root + application-platform + application-cassandra + application-keycloak (4 spots).
+
+5. Commit + push to `step-5-keycloak`.
+
+6. Run the bootstrap. New flow is unchanged from step 4 — install GitOps Operator → wait → patch ArgoCD customizations → apply namespace → create secrets → seed root Application:
+   ```bash
+   ./scripts/bootstrap.sh
+   ```
+
+7. Watch the full cascade. Cold-start with two new operators (RHBK + CNPG) plus Cassandra refactor on the same path: ~7-10 min:
+   ```bash
+   oc get application -n openshift-gitops -w
+   ```
+   Order you'll observe: GitOps Operator ready → root Application syncs → platform + product wrappers reconcile → operator subscriptions install (cass-operator + rhbk + cnpg, all wave 0 inside their leaves) → CRDs land → Postgres `Cluster` + `CassandraDatacenter` reconcile (wave 1) → Keycloak CR + Routes (wave 2) → `KeycloakRealmImport` Job runs (wave 3) → QE waits on Cassandra via init container, then comes up.
+
+8. Verify (see below). Both the persistence-survives-pod-restart (Keycloak) and the existing Cassandra persistence-survives-QE-restart (carryover from step 3, validates the refactor preserves behavior).
+
+9. Finale: flip `targetRevision: step-5-keycloak → main` on the 4-spot chain, merge, post-merge `oc apply -f bootstrap/root-application.yaml` from main.
 
 **Gotchas to know in advance**
 
-- **Sync-wave gating still applies.** If you take the RHBK Operator path, `application-keycloak` (wave 1) must wait for `rhbk-operator-subscription` (wave 0) to reach Healthy / CSV Succeeded — same pattern as cass-operator → application-cassandra. ArgoCD's built-in Subscription health check should gate this; if not, the fallback is a Lua check in `argocd-customizations.yaml` (see step 4 gotchas).
-- **Both managed-by labels.** Keycloak lands in `thatdot-openshift` (already labeled), so no new label work. If a future component needs its own namespace, that namespace must carry `argocd.argoproj.io/managed-by: openshift-gitops` AND be applied imperatively in `bootstrap.sh` (not via GitOps) — same chicken-and-egg as the existing `thatdot-openshift` namespace.
+- **The TLS-at-ingress gotcha is the headline lesson.** Keycloak embeds its hostname into the OIDC discovery doc, JWT `iss` claim, login redirects, and asset URLs. It has to be told *what URL the browser sees*, not what URL the pod sees. With edge-terminated Route: pod receives plain HTTP; `Keycloak.spec.hostname.hostname` set to `https://...` tells Keycloak what to put in tokens; `proxy.headers: xforwarded` tells Keycloak to trust `X-Forwarded-Proto: https` from the OpenShift router. Misconfigure any of these and the discovery doc serves `http://...` URLs — QE's OIDC validation will refuse to load in step 6. Verify by `curl`ing the discovery endpoint and confirming `issuer` starts with `https://`.
+- **Sync-wave gating is now *intra*-Application, not inter-Application.** The whole Keycloak stack is in one Application with four waves (0: subs, 1: postgres, 2: keycloak+route, 3: realm). ArgoCD applies wave N+1 after wave N is reported `Synced` — but `Synced` ≠ `Healthy`. Without health-aware gating, wave 1 will try to apply the Postgres `Cluster` CR before CNPG's CRD necessarily exists, log "no matches for kind" errors, and retry until it works. Convergent but noisy on first sync. If observation shows the noise is significant, fall back is a custom Lua health check on `Subscription` (keep it Progressing until CSV.phase == Succeeded) — same shape as the `CassandraDatacenter` Lua we already have. Don't write the Lua speculatively.
+- **`oc delete application` cleans up the Subscription but NOT the CSV.** OLM design: deleting a Subscription removes the desired-state CR but leaves the installed operator (CSV + pods + CRDs) untouched. So `oc delete application keycloak` is *faster than it looks* — operator pods keep running, CRDs stay registered, ArgoCD re-applies the Subscription on recreate and OLM treats it as a no-op against the existing CSV. Estimated reset: ~3-4 min (vs ~5-7 min for true cold install). For a truly nuclear reset including operator uninstall: manually `oc delete csv -l operators.coreos.com/rhbk-operator.thatdot-openshift -n thatdot-openshift` first.
+- **No built-in ArgoCD health checks for `Keycloak`, `KeycloakRealmImport`, or `cnpg.io/Cluster`.** Same shape as the `CassandraDatacenter` problem from step 3. Plan: rely on built-in fallback (Synced when CR exists) first, observe the cascade, and add Lua only if `application-keycloak` reports Healthy before things are actually serving. If the realm import races with Keycloak pod readiness, that's the signal to add a Lua check that watches `KeycloakRealmImport.status.conditions[?(@.type=="Done")].status == "True"`.
+- **Init-container probe for Postgres readiness?** RHBK Operator's reconciler should wait for the DB to be reachable before bringing the Keycloak pod fully Ready, but it doesn't *block* the pod from starting — the Keycloak Java process will retry connections. If we see CrashLoopBackOff during initial sync from "DB not ready," we add `manifests/keycloak/patches/wait-for-postgres.yaml` with the same `bash /dev/tcp/...` idiom as `wait-for-cassandra.yaml`. Determine empirically; the complementary sync-wave + initContainer rule applies (CLAUDE.md Critical Rules / README Conventions).
+- **CNPG OwnNamespace install needs CSV verification.** CloudNativePG's OperatorHub catalog entry typically advertises both AllNamespaces and OwnNamespace modes. Run `oc describe packagemanifest cloud-native-postgresql -n openshift-marketplace | grep -A1 -i installmode` before committing the Subscription. If OwnNamespace is `false`, install AllNamespaces into `openshift-operators` instead and accept the pattern asymmetry — document the divergence in the file.
+- **Seven operator-generated client secrets to retrieve.** The realm has 1 interactive client (`quine-enterprise-client`) + 6 CLI service-account clients (`qe-cli-*`). RHBK Operator does NOT automatically stash these in K8s Secrets (unlike `keycloak-initial-admin`). They have to be pulled via `kcadm.sh get clients/<id>/client-secret -r quine-enterprise` against the Keycloak pod. Step 5 verifies the *interactive* client secret can be retrieved and that a `qe-cli-admin` `client_credentials` grant returns a JWT with the right role claim — that's the smoke test that says the realm + service-account-role-mappings are wired correctly. Wiring the secrets into QE config is step 6.
+- **Service-account-role-mappings are easy to get wrong in YAML.** In `KeycloakRealmImport`, attaching a client role to a service-account user requires *two* things: (a) `serviceAccountsEnabled: true` on the client, and (b) a `serviceAccountClientRoles:` block at the realm level that maps `<cli-client-name>` → `quine-enterprise-client` → `[<role>]`. Miss part (b) and the client_credentials grant succeeds but the JWT contains no `roles` claim — QE sees a tokenless principal. The verification's JWT-decode step catches this.
+- **Test users use placeholder passwords with `temporary: true`.** Committing `placeholder123` is fine because Keycloak forces a password change on first login — the committed value is useless after first use. README documents this.
+- **`KeycloakRealmImport` is fire-once-then-stale.** The realm import CR triggers a one-shot Job (`kc.sh import --override`); operator marks `status.conditions[Done]: True` after the Job succeeds and *ignores subsequent edits* to the `realm:` block. This is identical between RHBK and upstream Keycloak Operator. The single-Application layout (operators + Postgres + Keycloak + realm all under `application-keycloak`) is the natural workflow: `oc delete application keycloak` re-creates the CR from cold, which re-triggers the import. See "Reset granularities" below for finer-grained options.
+- **Operator-generated admin password.** Keycloak Operator creates Secret `keycloak-initial-admin` in the same namespace with keys `username` (always `admin`) and `password` (random). Retrieve once, log in, optionally change. Documented in verification.
+- **Realm storage requires DB persistence.** This is what makes the "Keycloak survives pod restart" win condition meaningful — see Verification.
+
+**Reset granularities for iteration**
+
+The single-Application layout gives three levels of reset, from cheapest to most thorough. Use the smallest one that fits the change being debugged.
+
+| Scope | Command | Time | When to use |
+|---|---|---|---|
+| Realm only (fastest re-import) | `oc delete keycloakrealmimport quine-enterprise -n thatdot-openshift` | ~30s | Iterating realm YAML (clients, roles, users, role-mappings). ArgoCD re-creates the CR from drift; fresh Job re-imports. Postgres data persists, so existing realm contents get overwritten by `OVERWRITE_EXISTING`. |
+| Keycloak stack, no operators | `oc delete keycloak keycloak,keycloakrealmimport quine-enterprise,cluster.postgresql.cnpg.io keycloak-postgres -n thatdot-openshift` | ~3 min | Iterating `keycloak.yaml` config (hostname, proxy headers, db settings). Wipes the Postgres DB and Keycloak state; realm re-imports cold. Operator CSVs stay. |
+| **Entire Keycloak Application boundary** | `oc delete application keycloak -n openshift-gitops` | ~3-4 min | Anything more involved, or when you want guaranteed clean state. ArgoCD detects drift on `application-platform`, re-creates `application-keycloak`, which re-cascades the whole stack (subs → postgres → keycloak → realm). Operator CSVs/CRDs stay registered, so it's faster than a true cold install. |
+| Nuclear (incl. operator uninstall) | Manual `oc delete csv -l operators.coreos.com/rhbk-operator.thatdot-openshift -n thatdot-openshift` + the Application delete above | ~6-7 min | Should rarely be needed; only if an operator itself is wedged. |
 
 **Verification**
 
 ```bash
-oc get application keycloak -n openshift-gitops      # Synced + Healthy
-oc get pods -n thatdot-openshift -l app=keycloak     # Running, Ready 1/1
-oc get secret keycloak-tls -n thatdot-openshift      # service-ca-minted cert exists
-# Browser: hit the Keycloak Route, log in to admin console with the auto-generated admin secret
-# Confirm: 'quine-enterprise' realm visible, 6 users, 6 roles
-# Browser: log in as test user via the realm's account console
+# Both operators installed; all relevant CRDs available
+oc get csv -n thatdot-openshift | grep -iE 'rhbk|keycloak|postgresql'         # both Succeeded
+oc get crd keycloaks.k8s.keycloak.org keycloakrealmimports.k8s.keycloak.org   # exist
+oc get crd clusters.postgresql.cnpg.io                                         # exists
+
+# ArgoCD Applications healthy
+oc get application -n openshift-gitops                                         # all six Synced + Healthy
+# Expect: root, application-platform, application-product,
+#         application-cassandra, application-quine-enterprise, application-keycloak
+
+# Postgres up
+oc get cluster.postgresql.cnpg.io -n thatdot-openshift                         # keycloak-postgres — Ready
+oc get pods -n thatdot-openshift -l cnpg.io/cluster=keycloak-postgres          # Running
+
+# Keycloak up
+oc get keycloak -n thatdot-openshift                                           # keycloak — Ready: True
+oc get pods -n thatdot-openshift -l app=keycloak                               # Running, Ready 1/1
+
+# Realm imported
+oc get keycloakrealmimport -n thatdot-openshift                                # quine-enterprise — Done: True
+oc logs -n thatdot-openshift job/keycloak-quine-enterprise-realm | grep -i 'imported\|done'
+
+# Discovery endpoint serves correct issuer URL (the TLS-at-ingress sanity check)
+ROUTE=$(oc get route keycloak -n thatdot-openshift -o jsonpath='{.spec.host}')
+curl -sk "https://$ROUTE/realms/quine-enterprise/.well-known/openid-configuration" | \
+    jq '.issuer, .authorization_endpoint'
+# Both must start with "https://$ROUTE/..." — NOT http://, NOT internal service name
+
+# Retrieve admin password and log into admin console
+oc get secret keycloak-initial-admin -n thatdot-openshift \
+    -o jsonpath='{.data.password}' | base64 -d ; echo
+open "https://$ROUTE"
+# Browser: log in as 'admin' / <password above>
+# Confirm: 'quine-enterprise' realm visible in dropdown; 6 client roles; 6 test users
+
+# Test user can log in via realm's account console
+open "https://$ROUTE/realms/quine-enterprise/account"
+# Log in as 'admin1' / 'placeholder123' → forced to change password → lands in account console
+
+# Service-account CLI client can mint a bearer token with the right role claim
+# (proves the qe-cli-* clients + role mappings are wired correctly)
+KC_POD=$(oc get pod -n thatdot-openshift -l app=keycloak -o jsonpath='{.items[0].metadata.name}')
+oc exec -n thatdot-openshift "$KC_POD" -- \
+    /opt/keycloak/bin/kcadm.sh config credentials \
+    --server http://localhost:8080 --realm master \
+    --user admin --password "$(oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.password}' | base64 -d)"
+# Get the qe-cli-admin client secret:
+CLI_ID=$(oc exec -n thatdot-openshift "$KC_POD" -- \
+    /opt/keycloak/bin/kcadm.sh get clients -r quine-enterprise -q clientId=qe-cli-admin --fields id --format csv --noquotes | tail -n1)
+CLI_SECRET=$(oc exec -n thatdot-openshift "$KC_POD" -- \
+    /opt/keycloak/bin/kcadm.sh get "clients/$CLI_ID/client-secret" -r quine-enterprise --fields value --format csv --noquotes | tail -n1)
+# Use it to request a token via client_credentials grant:
+TOKEN=$(curl -sk -d "client_id=qe-cli-admin" -d "client_secret=$CLI_SECRET" \
+    -d "grant_type=client_credentials" \
+    "https://$ROUTE/realms/quine-enterprise/protocol/openid-connect/token" | jq -r .access_token)
+# Decode the JWT payload and confirm the 'admin' role is present:
+echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '.resource_access["quine-enterprise-client"].roles, .iss'
+# Expected: ["admin"]  and  "https://$ROUTE/realms/quine-enterprise"
+# (Repeat with qe-cli-billing to confirm role isolation — token should contain ["billing"], not ["admin"])
+
+# THE WIN CONDITION — realm + users + roles + service-account clients survive Keycloak pod restart
+oc delete pod -n thatdot-openshift -l app=keycloak
+# Wait for new pod (oc get pods -w), re-open https://$ROUTE in browser:
+#   - Realm 'quine-enterprise' STILL there
+#   - 6 users STILL there
+#   - 6 roles STILL there
+# Proves: realm config lives in Postgres (not in Keycloak's pod-local H2 fallback)
+
+# Re-mint a qe-cli-* token after the restart — still works, same claims.
 ```
 
-**Done when** the Keycloak admin console is reachable via HTTPS, the `quine-enterprise` realm has the expected users + roles, and a test user can log in via the realm's account UI.
+**Done when** the discovery doc serves `https://`-prefixed URLs (TLS-at-ingress configured correctly), the admin console shows the realm with 6 client roles, 6 interactive users, and 6 service-account CLI clients, a test user can log in via the account console, a `client_credentials` grant against `qe-cli-admin` returns a JWT carrying `roles: ["admin"]`, *and* all of the above survive a Keycloak pod restart. All six Applications report `Synced + Healthy`.
 
-**README addendum** "Step 5: Keycloak with quine-enterprise realm."
+**README addendum** "Step 5: Keycloak with quine-enterprise realm" — covers RHBK Operator + CNPG operator install, the edge-Route + `hostname.hostname` + `proxy.headers: xforwarded` pattern, where to retrieve the admin password, the password-reset-on-first-login flow for test users, and the pod-restart persistence test.
 
 ---
 

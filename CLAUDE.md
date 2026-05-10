@@ -84,21 +84,38 @@ manifests/                   # GitOps-synced. The 3-level app-of-apps tree:
     application-platform.yaml   # sync-wave "0"; itself an app-of-apps over manifests/platform/
     application-product.yaml    # sync-wave "1"; itself an app-of-apps over manifests/product/
 
-  platform/                  # Operator subscriptions + ArgoCD Apps for infra workloads.
-                             # Future home of identity (Keycloak — step 5), monitoring, etc.
+  platform/                  # ArgoCD Apps for platform/infra workloads.
+                             # Only Application CRs live here — operator subs live INSIDE each leaf.
+                             # See "single-Application boundary" pattern note below.
     kustomization.yaml
-    cass-operator-subscription.yaml   # OperatorGroup + Subscription (sync-wave "0")
-    application-cassandra.yaml        # ArgoCD App for Cassandra (sync-wave "1")
+    application-cassandra.yaml        # ArgoCD App for the Cassandra stack    (sync-wave "1")
+    application-keycloak.yaml         # ArgoCD App for the Keycloak stack     (sync-wave "1")
 
   product/                   # ArgoCD Apps for differentiating workloads.
                              # Future home of Novelty, etc.
     kustomization.yaml
     application-quine-enterprise.yaml
 
+  # Single-Application boundary pattern (adopted step 5; applies to every platform-layer leaf):
+  # operators + workload CRs together in one leaf, ordered by sync-wave annotations.
+  # `oc delete application <name>` recreates the whole stack cold. Same rule for both leaves.
+
   cassandra/                 # LEAF: synced by manifests/platform/application-cassandra.yaml.
-    kustomization.yaml       #   resources: SA + RoleBinding + CassandraDatacenter CR
-    cassandradatacenter.yaml
-    serviceaccount.yaml
+    kustomization.yaml
+    cass-operator-subscription.yaml   # Subscription, sync-wave "0"
+    serviceaccount.yaml               # anyuid RoleBinding, sync-wave "0" (see step 3 SCC gotcha)
+    cassandradatacenter.yaml          # CassandraDatacenter CR, sync-wave "1"
+
+  keycloak/                  # LEAF: synced by manifests/platform/application-keycloak.yaml.
+                             # KeycloakRealmImport is fire-once — `oc delete application keycloak`
+                             # is the natural workflow for realm-config iteration.
+    kustomization.yaml
+    rhbk-operator-subscription.yaml   # Subscription, sync-wave "0"
+    cnpg-operator-subscription.yaml   # Subscription, sync-wave "0"
+    postgres-cluster.yaml             # CNPG Cluster CR, sync-wave "1"
+    keycloak.yaml                     # RHBK Keycloak CR, sync-wave "2"
+    route.yaml                        # edge-terminated Route, sync-wave "2"
+    keycloak-realm-import.yaml        # KeycloakRealmImport CR, sync-wave "3" (fire-once)
 
   quine-enterprise/          # LEAF: synced by manifests/product/application-quine-enterprise.yaml.
     kustomization.yaml       #   helmCharts: QE 0.5.3, resources: route.yaml, patches: wait-for-cassandra
@@ -127,6 +144,7 @@ scripts/                     # Helper scripts (idempotent)
 - **Moving image tags require `imagePullPolicy: Always`.** Tags like `:main` get repointed by the registry; `IfNotPresent` would serve the kubelet's stale cache forever. Pinned semver tags (`:0.5.3`) can stay `IfNotPresent`.
 - **The QE 0.5.3 chart supports `imagePullSecrets` natively** (in `values.yaml`). No Kustomize patch needed; just set the field in our values file.
 - Cassandra datacenter name is taken from the CR's `metadata.name` — keep Helm values' `cassandra.localDatacenter` aligned.
+- **`KeycloakRealmImport` is fire-once.** Operator marks the CR `status.Done: True` after the import Job succeeds; subsequent edits to the `realm:` block are ignored. To re-import: `oc delete keycloakrealmimport quine-enterprise -n thatdot-openshift` (drift triggers ArgoCD to recreate it) — or, for a full stack reset, `oc delete application keycloak -n openshift-gitops`. This is why `manifests/keycloak/` uses the single-Application-boundary layout.
 
 ## When you finish a piece of work
 

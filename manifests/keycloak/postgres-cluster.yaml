@@ -1,0 +1,36 @@
+# Postgres backing store for Keycloak — managed by CloudNativePG.
+#
+# CNPG operator creates:
+#   - StatefulSet `keycloak-postgres-1`
+#   - Services `keycloak-postgres-rw` (primary writes), `keycloak-postgres-ro` (replicas reads),
+#               `keycloak-postgres-r` (any reachable replica). Keycloak.spec.db.host
+#               below points at `-rw`.
+#   - Secret `keycloak-postgres-app` with keys `username` (the initdb owner) and
+#               `password` (random, auto-generated). Keycloak's CR references this
+#               for `db.usernameSecret` + `db.passwordSecret`.
+#   - PVC sized per `spec.storage.size`.
+#
+# OpenShift SCC: CNPG runs as non-root with no fixed UID, so it passes
+# `restricted-v2` cleanly. No anyuid RoleBinding needed (unlike Cassandra).
+#
+# sync-wave "1": Wave 0's cnpg-operator-subscription must reach CSV Succeeded
+# for the CRD `postgresql.cnpg.io/Cluster` to exist. ArgoCD retries until
+# the CRD is available; first sync may log "no matches for kind" briefly.
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: keycloak-postgres
+  namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  instances: 1
+  storage:
+    size: 2Gi
+    # storageClass intentionally omitted — uses the cluster's default
+    # StorageClass (crc-csi-hostpath-provisioner on CRC).
+  bootstrap:
+    initdb:
+      database: keycloak
+      owner: keycloak
