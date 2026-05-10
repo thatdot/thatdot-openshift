@@ -145,6 +145,7 @@ scripts/                     # Helper scripts (idempotent)
 - **The QE 0.5.3 chart supports `imagePullSecrets` natively** (in `values.yaml`). No Kustomize patch needed; just set the field in our values file.
 - Cassandra datacenter name is taken from the CR's `metadata.name` — keep Helm values' `cassandra.localDatacenter` aligned.
 - **`KeycloakRealmImport` is fire-once.** Operator marks the CR `status.Done: True` after the import Job succeeds; subsequent edits to the `realm:` block are ignored. To re-import: `oc delete keycloakrealmimport quine-enterprise -n thatdot-openshift` (drift triggers ArgoCD to recreate it) — or, for a full stack reset, `oc delete application keycloak -n openshift-gitops`. This is why `manifests/keycloak/` uses the single-Application-boundary layout.
+- **Operator-CRD chicken-and-egg in single-Application leaves.** When an Application contains both a Subscription (wave 0) and a CR whose CRD that Subscription installs (wave 1+), ArgoCD's pre-flight dry-run fails on the CR ("no matches for kind …") *before* wave 0 even gets a chance to install the operator — fails the whole sync after 5 retries. **Fix:** annotate the CRD-dependent resource with `argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true`. Sync-waves still order the apply correctly; this just disables the pre-flight validation that aborts the whole sync prematurely. Applied to: `CassandraDatacenter`, `cnpg.io/Cluster`, `Keycloak`, `KeycloakRealmImport`.
 
 ## When you finish a piece of work
 

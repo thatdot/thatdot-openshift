@@ -34,6 +34,10 @@ metadata:
   namespace: thatdot-openshift
   annotations:
     argocd.argoproj.io/sync-wave: "2"
+    # CRD `k8s.keycloak.org/Keycloak` is installed by RHBK operator in wave 0
+    # of this same Application. See cassandradatacenter.yaml for the full
+    # explanation of why this annotation is required.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   instances: 1
   db:
