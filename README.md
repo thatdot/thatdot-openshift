@@ -136,6 +136,34 @@ TOKEN=$(curl -sk -d "client_id=$CLIENT_ID" -d "client_secret=$CLI_SECRET" -d "gr
 curl -sk -H "Authorization: Bearer $TOKEN" "https://$QE_ROUTE/api/v2/auth/me" | jq
 ```
 
+### Inspect a user's access token shape
+
+Useful when debugging "why isn't this user getting the right permissions?" or when confirming a realm-config change produced the expected JWT structure. Keycloak's admin console has a built-in "Generated access token" tool that shows the full JSON payload it would mint for a given user — no curl, no password reset, no token decoding.
+
+```bash
+# Get the admin password and Keycloak Route
+oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.username}' | base64 -d; echo
+oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.password}' | base64 -d; echo
+open "https://$(oc get route keycloak -n thatdot-openshift -o jsonpath='{.spec.host}')"
+```
+
+Then in the admin UI:
+
+1. Top-left realm switcher → **`quine-enterprise`** (not the default `Keycloak` realm)
+2. Left nav → **Clients** → click `quine-enterprise-client`
+3. Top tabs → **Client scopes** → sub-tab **Evaluate**
+4. **Users** dropdown → pick `superadmin1` (or any other interactive user)
+5. Click **"Generated access token"** in the right pane
+
+Verify the payload has:
+
+- `roles` at the **top level** (not nested under `resource_access.<client>.roles` or similar)
+- `roles` containing the exact PascalCase value(s) for that user (`SuperAdmin`, `Admin`, etc. — case-sensitive)
+- `iss` starting with `https://...`
+- `aud` including `quine-enterprise-client`
+
+The "Generated user info" and "Generated ID token" buttons next to it show what each endpoint returns for the same user.
+
 ### Reset a single workload
 
 The single-Application-boundary layout means each stack is independently resettable:
