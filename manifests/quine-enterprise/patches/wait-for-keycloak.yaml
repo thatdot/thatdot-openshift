@@ -1,0 +1,51 @@
+# Init container patch — blocks the QE pod until the Keycloak realm's OIDC
+# discovery doc is reachable AND the cert chain validates. Applied via
+# Kustomize's `patches:` mechanism (see ../kustomization.yaml).
+#
+# Why probe the realm-aware discovery endpoint instead of a TCP connect:
+#   /realms/<realm>/.well-known/openid-configuration only returns 200 when
+#   BOTH (a) Keycloak is up AND (b) the `quine-enterprise` realm has been
+#   imported by the operator. A TCP probe to port 8080 would succeed before
+#   the realm exists, and QE's OIDC bootstrap would then crash on the missing
+#   realm. One HTTP check covers both dependencies.
+#
+# Why we don't use `-k` (insecure):
+#   Step 6 deliberately validates the cert chain — same posture QE itself
+#   will use. Catches misconfigured trust early (e.g., the build-truststore
+#   init container didn't pick up the cluster CA). curl uses `--cacert`
+#   pointed at the OpenShift trust bundle directly (PEM, not the JKS that
+#   build-truststore produces).
+#
+# Why ubi9 (not ubi9-minimal):
+#   ubi9-minimal lacks curl by default. ubi9 standard has bash + curl + the
+#   basics with a slightly larger image — acceptable for an init container.
+#
+# Hostname is hardcoded to the CRC apps domain. When porting to a real
+# OpenShift cluster, swap apps-crc.testing for that cluster's
+# `*.apps.<cluster>.<domain>`.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quine-enterprise
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: wait-for-keycloak
+          image: registry.access.redhat.com/ubi9/ubi:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              URL="https://keycloak-thatdot-openshift.apps-crc.testing/realms/quine-enterprise/.well-known/openid-configuration"
+              echo "Waiting for Keycloak realm discovery doc at $URL..."
+              until curl -fsS --cacert /injected-ca/ca-bundle.crt -o /dev/null "$URL"; do
+                sleep 5
+              done
+              echo "Keycloak realm is ready. Starting Quine Enterprise."
+          volumeMounts:
+            - name: cluster-ingress-ca
+              mountPath: /injected-ca
+              readOnly: true

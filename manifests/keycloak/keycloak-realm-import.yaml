@@ -10,12 +10,21 @@
 # Realm contents (ports from ../opstools/keycloak/k8s/realm.json with public-repo-safe edits):
 #   - 1 interactive OIDC client: quine-enterprise-client
 #     * standardFlowEnabled + directAccessGrantsEnabled (browser + CLI password flows)
-#     * protocolMappers: client-role mapper (→ `resource_access.<client>.roles`) +
+#     * protocolMappers: client-role mapper (→ top-level `roles` claim) +
 #       audience mapper (→ `aud: quine-enterprise-client`).
+#     * NOTE: claim.name MUST be top-level "roles", not nested like
+#       "resource_access.<client>.roles". QE's AccessTokenClaims.decoder reads
+#       `roles` at the JWT root; nesting it causes the /me handler to fail with
+#       `CouldNotDecodeClaim(DecodingFailure at .roles: Missing required field)`.
+#       Discovered the hard way during step 6 debugging.
 #     * `secret:` OMITTED — operator generates; retrieve with `kcadm.sh`.
 #     * NO redirectUris yet — step 6 adds QE's Route URL.
-#   - 6 client roles on quine-enterprise-client: superadmin, admin, architect,
-#     dataengineer, analyst, billing
+#   - 6 client roles on quine-enterprise-client: SuperAdmin, Admin, Architect,
+#     DataEngineer, Analyst, Billing — exact PascalCase. quine-auth's
+#     Role.fromReferenceOrName does case-sensitive exact string match against
+#     these six references with no aliasing; any other spelling (lowercase,
+#     kebab-case, etc.) is silently discarded by the decoder, producing
+#     "logged in but empty roles". Discovered the hard way during step 6.
 #   - 6 interactive users (admin1, ..., billing1): placeholder passwords with
 #     `temporary: true`. Keycloak forces a password change on first login, so the
 #     committed placeholder is useless after that. Each user has its matching
@@ -59,17 +68,17 @@ spec:
     roles:
       client:
         quine-enterprise-client:
-          - name: superadmin
+          - name: SuperAdmin
             description: Full administrative access
-          - name: admin
+          - name: Admin
             description: Administrative access (operator-level)
-          - name: architect
+          - name: Architect
             description: Schema/query design + read/write
-          - name: dataengineer
+          - name: DataEngineer
             description: Ingest pipelines + standing queries
-          - name: analyst
+          - name: Analyst
             description: Read-only query access
-          - name: billing
+          - name: Billing
             description: Billing/usage visibility
 
     # ---- Clients ----
@@ -83,13 +92,25 @@ spec:
         publicClient: false
         clientAuthenticatorType: client-secret
         # secret: OMITTED — Keycloak generates one on first import; retrieve via kcadm.
-        standardFlowEnabled: true        # browser auth code flow (for step 6 wiring)
+        standardFlowEnabled: true        # browser auth code flow (step 6)
         implicitFlowEnabled: false
         directAccessGrantsEnabled: true  # password grant for CLI/dev convenience
         serviceAccountsEnabled: false
-        # NOTE: redirectUris intentionally empty — step 6 adds QE's Route URL.
-        redirectUris: []
-        webOrigins: []
+        # QE Route URL on CRC. We register BOTH the bare hostname and the
+        # `:443` form because QE 1.10.6 explicitly emits `:443` in its
+        # generated redirect_uri (even though that's the HTTPS default port).
+        # Keycloak's redirectUri match is literal string + path wildcard, so
+        # `https://host:443/...` does NOT match `https://host/*` — we have
+        # to register both to be safe across QE versions and behaviors.
+        # Same applies to webOrigins (CORS origin matching).
+        # When porting to a real cluster, swap apps-crc.testing for that
+        # cluster's `*.apps.<cluster>.<domain>`.
+        redirectUris:
+          - "https://quine-enterprise-thatdot-openshift.apps-crc.testing/*"
+          - "https://quine-enterprise-thatdot-openshift.apps-crc.testing:443/*"
+        webOrigins:
+          - "https://quine-enterprise-thatdot-openshift.apps-crc.testing"
+          - "https://quine-enterprise-thatdot-openshift.apps-crc.testing:443"
         defaultClientScopes:
           - web-origins
           - acr
@@ -103,7 +124,7 @@ spec:
             protocolMapper: oidc-usermodel-client-role-mapper
             consentRequired: false
             config:
-              claim.name: "resource_access.${client_id}.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -137,7 +158,7 @@ spec:
             protocol: openid-connect
             protocolMapper: oidc-usermodel-client-role-mapper
             config:
-              claim.name: "resource_access.quine-enterprise-client.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -167,7 +188,7 @@ spec:
             protocol: openid-connect
             protocolMapper: oidc-usermodel-client-role-mapper
             config:
-              claim.name: "resource_access.quine-enterprise-client.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -197,7 +218,7 @@ spec:
             protocol: openid-connect
             protocolMapper: oidc-usermodel-client-role-mapper
             config:
-              claim.name: "resource_access.quine-enterprise-client.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -227,7 +248,7 @@ spec:
             protocol: openid-connect
             protocolMapper: oidc-usermodel-client-role-mapper
             config:
-              claim.name: "resource_access.quine-enterprise-client.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -257,7 +278,7 @@ spec:
             protocol: openid-connect
             protocolMapper: oidc-usermodel-client-role-mapper
             config:
-              claim.name: "resource_access.quine-enterprise-client.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -287,7 +308,7 @@ spec:
             protocol: openid-connect
             protocolMapper: oidc-usermodel-client-role-mapper
             config:
-              claim.name: "resource_access.quine-enterprise-client.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -329,7 +350,7 @@ spec:
           - default-roles-quine-enterprise
         clientRoles:
           quine-enterprise-client:
-            - superadmin
+            - SuperAdmin
 
       - username: admin1
         enabled: true
@@ -352,7 +373,7 @@ spec:
           - default-roles-quine-enterprise
         clientRoles:
           quine-enterprise-client:
-            - admin
+            - Admin
 
       - username: architect1
         enabled: true
@@ -375,7 +396,7 @@ spec:
           - default-roles-quine-enterprise
         clientRoles:
           quine-enterprise-client:
-            - architect
+            - Architect
 
       - username: dataengineer1
         enabled: true
@@ -398,7 +419,7 @@ spec:
           - default-roles-quine-enterprise
         clientRoles:
           quine-enterprise-client:
-            - dataengineer
+            - DataEngineer
 
       - username: analyst1
         enabled: true
@@ -421,7 +442,7 @@ spec:
           - default-roles-quine-enterprise
         clientRoles:
           quine-enterprise-client:
-            - analyst
+            - Analyst
 
       - username: billing1
         enabled: true
@@ -444,7 +465,7 @@ spec:
           - default-roles-quine-enterprise
         clientRoles:
           quine-enterprise-client:
-            - billing
+            - Billing
 
       # === Service-account users — one per qe-cli-* client ===
       # Username convention is fixed by Keycloak: `service-account-<clientId>`.
@@ -456,39 +477,39 @@ spec:
         serviceAccountClientId: qe-cli-superadmin
         clientRoles:
           quine-enterprise-client:
-            - superadmin
+            - SuperAdmin
 
       - username: service-account-qe-cli-admin
         enabled: true
         serviceAccountClientId: qe-cli-admin
         clientRoles:
           quine-enterprise-client:
-            - admin
+            - Admin
 
       - username: service-account-qe-cli-architect
         enabled: true
         serviceAccountClientId: qe-cli-architect
         clientRoles:
           quine-enterprise-client:
-            - architect
+            - Architect
 
       - username: service-account-qe-cli-dataengineer
         enabled: true
         serviceAccountClientId: qe-cli-dataengineer
         clientRoles:
           quine-enterprise-client:
-            - dataengineer
+            - DataEngineer
 
       - username: service-account-qe-cli-analyst
         enabled: true
         serviceAccountClientId: qe-cli-analyst
         clientRoles:
           quine-enterprise-client:
-            - analyst
+            - Analyst
 
       - username: service-account-qe-cli-billing
         enabled: true
         serviceAccountClientId: qe-cli-billing
         clientRoles:
           quine-enterprise-client:
-            - billing
+            - Billing

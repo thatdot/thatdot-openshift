@@ -37,9 +37,27 @@ cassandra:
   plaintextAuth:
     enabled: false
 
-# OIDC disabled — RBAC comes in step 5.
+# OIDC config — Step 6 wires QE's auth against the Keycloak realm provisioned
+# in step 5. Explicit URLs (no auto-discovery yet): QE 0.5.3 doesn't support
+# OIDC discovery-URL config, so we set each endpoint individually. All three
+# URLs reference the Keycloak Route's public hostname (must match the JWT
+# `iss` claim, which Keycloak emits using its own `hostname.hostname` setting
+# — see manifests/keycloak/keycloak.yaml).
+#
+# Client credentials live in the `quine-enterprise-oidc-credentials` Secret,
+# created out-of-band by scripts/create-qe-oidc-client-secret.sh (which
+# extracts the operator-generated secret from Keycloak via kcadm.sh on first
+# bootstrap; idempotent on re-run).
 oidc:
-  enabled: false
+  enabled: true
+  provider:
+    locationUrl: "https://keycloak-thatdot-openshift.apps-crc.testing/realms/quine-enterprise"
+    authorizationUrl: "https://keycloak-thatdot-openshift.apps-crc.testing/realms/quine-enterprise/protocol/openid-connect"
+    tokenUrl: "https://keycloak-thatdot-openshift.apps-crc.testing/realms/quine-enterprise/protocol/openid-connect/token"
+    loginPath: "auth"
+  client:
+    existingSecret:
+      name: "quine-enterprise-oidc-credentials"
 
 # ClusterIP exposed via OpenShift Route (not LoadBalancer — that's a
 # Docker-Desktop pattern, not how OpenShift ingress works).
@@ -57,7 +75,57 @@ resources:
     # No CPU limit — CFS throttling on JVM is usually counterproductive.
 
 # JVM args. -Xmx2g caps heap inside the 4Gi pod limit.
+#
+# The trustStore settings point at the JKS file produced by the
+# build-truststore init container (see patches/build-truststore.yaml). That
+# JKS bundles the system cacerts (public CAs — needed for license-server) and
+# the cluster ingress CA (needed for the Keycloak Route's wildcard cert
+# chain). Password is the JDK default `changeit`; trustStore content isn't
+# secret.
+#
+# The `webserver-advertise.*` triplet tells QE what URL the *browser* uses,
+# regardless of what the pod sees locally. Without these, QE generates its
+# OIDC `redirect_uri` from its own listener (`http://` on port 8080 internally),
+# which the browser then sees in the Keycloak login URL — and the realm import
+# only registered the `https://...:443/*` form, so Keycloak rejects the login.
+# All three (address, port, use-tls) are required: `use-tls=true` flips
+# QE-generated URLs from http:// to https://; `address`+`port` set the host
+# and port the URL embeds. Reference: thatDot QE team guidance attached to
+# the public.ecr.aws/thatdot/quine-enterprise:1.10.6 release notes.
 extraJdkArgs: >-
   -Xmx2g
   -Dquine.default-api-version=v2
   -Dquine.license-server-uri=https://license-server.dev.thatdot.com
+  -Djavax.net.ssl.trustStore=/opt/truststore/cacerts
+  -Djavax.net.ssl.trustStorePassword=changeit
+  -Djavax.net.ssl.trustStoreType=JKS
+  -Dquine.webserver-advertise.address=quine-enterprise-thatdot-openshift.apps-crc.testing
+  -Dquine.webserver-advertise.port=443
+  -Dquine.webserver-advertise.use-tls=true
+  -Dquine.auth.oidc.full.provider.access-token-audience=quine-enterprise-client
+
+# Volumes for the truststore wiring:
+#   - cluster-ingress-ca: a ConfigMap holding the OpenShift cluster's
+#     ingress-operator CA bundle (extracted from
+#     openshift-config-managed/default-ingress-cert by
+#     scripts/create-cluster-ingress-ca-configmap.sh on every bootstrap).
+#     Consumed by the init containers — build-truststore reads it to import
+#     into the JKS; wait-for-keycloak uses it as curl --cacert.
+#   - truststore: emptyDir shared between build-truststore (writes JKS) and
+#     the main QE container (reads JKS via the JVM args above).
+#
+# NB: we deliberately do NOT use the OpenShift `inject-trusted-cabundle` label
+# here. That label injects the cluster's *proxy* CA bundle (public CAs +
+# corporate proxy CAs), NOT the ingress-operator CA we need to validate
+# Keycloak's Route TLS chain. See CLAUDE.md gotcha on this.
+volumes:
+  - name: cluster-ingress-ca
+    configMap:
+      name: cluster-ingress-ca
+  - name: truststore
+    emptyDir: {}
+
+volumeMounts:
+  - name: truststore
+    mountPath: /opt/truststore
+    readOnly: true

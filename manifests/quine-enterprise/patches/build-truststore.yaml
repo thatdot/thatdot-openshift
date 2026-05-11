@@ -1,0 +1,75 @@
+# Init container patch — builds a JKS truststore from the OpenShift trust bundle.
+# Applied via Kustomize's `patches:` mechanism (see ../kustomization.yaml).
+#
+# What this solves:
+#   QE's JVM needs to validate Keycloak's TLS cert (cluster-wildcard cert signed
+#   by OpenShift's ingress-operator CA, which the default JDK cacerts don't
+#   trust). We can't `-k` our way through it — QE's OIDC library REJECTS
+#   self-signed/unknown CAs by design.
+#
+# How it works:
+#   1. Copy the JDK image's system cacerts (which trusts public CAs — needed for
+#      the license server at license-server.dev.thatdot.com) to the shared
+#      `truststore` emptyDir volume.
+#   2. Read the OpenShift trust bundle (a PEM file with multiple certs
+#      concatenated) from the `trusted-ca-bundle` ConfigMap mount.
+#   3. Split the bundle into one file per cert with awk, then `keytool
+#      -importcert` each one into the cacerts copy. Net result: a JKS that
+#      trusts public CAs AND the OpenShift cluster CA.
+#   4. The main QE container mounts the emptyDir at /opt/truststore and
+#      points the JVM at it via -Djavax.net.ssl.trustStore=...
+#
+# Why split the bundle (awk loop) rather than `keytool -import <bundle>`:
+#   keytool's -importcert only imports the FIRST cert in a multi-cert PEM
+#   file. The OpenShift bundle often has 2-3 concatenated certs (cluster CA,
+#   custom CAs if configured). Splitting and importing each individually is
+#   the standard workaround.
+#
+# Why this image:
+#   ubi9/openjdk-21 ships with keytool + a clean cacerts at
+#   /etc/pki/java/cacerts (symlinked to the JDK's own cacerts). Same family
+#   as QE's runtime; less risk of cacerts content drift.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quine-enterprise
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: build-truststore
+          image: registry.access.redhat.com/ubi9/openjdk-21:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              echo "Copying system cacerts to /workspace/cacerts..."
+              cp /etc/pki/java/cacerts /workspace/cacerts
+              chmod u+w /workspace/cacerts
+
+              echo "Splitting OpenShift trust bundle into individual cert files..."
+              cd /tmp
+              awk 'BEGIN{n=0} /-----BEGIN CERTIFICATE-----/{n++} {print > sprintf("cert-%03d.pem", n)}' \
+                  /injected-ca/ca-bundle.crt
+
+              count=0
+              for cert in /tmp/cert-*.pem; do
+                if [ -s "$cert" ] && grep -q 'BEGIN CERTIFICATE' "$cert"; then
+                  alias="openshift-trust-$(basename "$cert" .pem)"
+                  keytool -importcert -noprompt -trustcacerts \
+                      -alias "$alias" \
+                      -file "$cert" \
+                      -keystore /workspace/cacerts \
+                      -storepass changeit
+                  count=$((count + 1))
+                fi
+              done
+              echo "Imported $count OpenShift cluster trust bundle certificate(s) into /workspace/cacerts."
+          volumeMounts:
+            - name: cluster-ingress-ca
+              mountPath: /injected-ca
+              readOnly: true
+            - name: truststore
+              mountPath: /workspace

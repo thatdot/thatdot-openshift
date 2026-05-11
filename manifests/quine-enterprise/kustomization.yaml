@@ -13,16 +13,39 @@ helmCharts:
     valuesFile: values.yaml
 
 # Plain YAML resources merged with the chart's output.
-# The chart doesn't ship a Route (it's vanilla-K8s, not OpenShift-aware) — we add ours.
+# - route.yaml: OpenShift Route (chart is vanilla-K8s, not OpenShift-aware)
+#
+# Note: the `cluster-ingress-ca` ConfigMap that build-truststore + wait-for-keycloak
+# consume is NOT a GitOps-managed resource. It's populated by
+# scripts/create-cluster-ingress-ca-configmap.sh (called from bootstrap.sh)
+# because the source data (openshift-config-managed/default-ingress-cert) is
+# cluster state that we extract at deploy time. ArgoCD would have nothing to
+# diff if we put an empty stub here — the CA value isn't in git.
 resources:
   - route.yaml
 
 # Strategic-merge patches applied to the chart-rendered resources.
-# - wait-for-cassandra: adds an initContainer to the Deployment that blocks until
-#   `quine-dc1-service:9042` accepts a TCP connection. Handles QE-after-Cassandra
-#   ordering at the pod level (no ArgoCD app-of-apps required).
+#
+# Init container order in the rendered Deployment (each adds one entry, in
+# the order they're listed below):
+#   1. build-truststore   — produces /opt/truststore/cacerts from the
+#                           OpenShift trust bundle (JKS with public CAs +
+#                           cluster CA). Step 6.
+#   2. wait-for-cassandra — TCP probe to quine-dc1-service:9042. Step 3.
+#   3. wait-for-keycloak  — HTTPS probe to the realm OIDC discovery endpoint,
+#                           cert-validating against the trust bundle. Step 6.
+# Effect: QE main container starts only after the JKS is written AND both
+# infra deps respond.
 patches:
+  - path: patches/build-truststore.yaml
+    target:
+      kind: Deployment
+      name: quine-enterprise
   - path: patches/wait-for-cassandra.yaml
+    target:
+      kind: Deployment
+      name: quine-enterprise
+  - path: patches/wait-for-keycloak.yaml
     target:
       kind: Deployment
       name: quine-enterprise
