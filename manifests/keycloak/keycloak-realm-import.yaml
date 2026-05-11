@@ -64,17 +64,17 @@ spec:
     roles:
       client:
         quine-enterprise-client:
-          - name: superadmin
+          - name: SuperAdmin
             description: Full administrative access
-          - name: admin
+          - name: Admin
             description: Administrative access (operator-level)
-          - name: architect
+          - name: Architect
             description: Schema/query design + read/write
-          - name: dataengineer
+          - name: DataEngineer
             description: Ingest pipelines + standing queries
-          - name: analyst
+          - name: Analyst
             description: Read-only query access
-          - name: billing
+          - name: Billing
             description: Billing/usage visibility
 
     # ---- Clients ----
@@ -346,7 +346,7 @@ spec:
           - default-roles-quine-enterprise
         clientRoles:
           quine-enterprise-client:
-            - superadmin
+            - SuperAdmin
 
       - username: admin1
         enabled: true
@@ -369,7 +369,7 @@ spec:
           - default-roles-quine-enterprise
         clientRoles:
           quine-enterprise-client:
-            - admin
+            - Admin
 
       - username: architect1
         enabled: true
@@ -392,7 +392,7 @@ spec:
           - default-roles-quine-enterprise
         clientRoles:
           quine-enterprise-client:
-            - architect
+            - Architect
 
       - username: dataengineer1
         enabled: true
@@ -415,7 +415,7 @@ spec:
           - default-roles-quine-enterprise
         clientRoles:
           quine-enterprise-client:
-            - dataengineer
+            - DataEngineer
 
       - username: analyst1
         enabled: true
@@ -438,7 +438,7 @@ spec:
           - default-roles-quine-enterprise
         clientRoles:
           quine-enterprise-client:
-            - analyst
+            - Analyst
 
       - username: billing1
         enabled: true
@@ -461,7 +461,7 @@ spec:
           - default-roles-quine-enterprise
         clientRoles:
           quine-enterprise-client:
-            - billing
+            - Billing
 
       # === Service-account users — one per qe-cli-* client ===
       # Username convention is fixed by Keycloak: `service-account-<clientId>`.
@@ -473,39 +473,39 @@ spec:
         serviceAccountClientId: qe-cli-superadmin
         clientRoles:
           quine-enterprise-client:
-            - superadmin
+            - SuperAdmin
 
       - username: service-account-qe-cli-admin
         enabled: true
         serviceAccountClientId: qe-cli-admin
         clientRoles:
           quine-enterprise-client:
-            - admin
+            - Admin
 
       - username: service-account-qe-cli-architect
         enabled: true
         serviceAccountClientId: qe-cli-architect
         clientRoles:
           quine-enterprise-client:
-            - architect
+            - Architect
 
       - username: service-account-qe-cli-dataengineer
         enabled: true
         serviceAccountClientId: qe-cli-dataengineer
         clientRoles:
           quine-enterprise-client:
-            - dataengineer
+            - DataEngineer
 
       - username: service-account-qe-cli-analyst
         enabled: true
         serviceAccountClientId: qe-cli-analyst
         clientRoles:
           quine-enterprise-client:
-            - analyst
+            - Analyst
 
       - username: service-account-qe-cli-billing
         enabled: true
         serviceAccountClientId: qe-cli-billing
         clientRoles:
           quine-enterprise-client:
-            - billing
+            - Billing
