@@ -132,13 +132,18 @@ spec:
           - basic
           - email
         protocolMappers:
-          # NOTE: deliberately removed the top-level `roles` mapper to reproduce
-          # the infinite-redirect-loop bug. Without this mapper, the JWT carries
-          # roles only under `resource_access.quine-enterprise-client.roles` (the
-          # built-in `roles` client scope), which QE's decoder does not read.
-          # Expected symptom: tight redirect loop, /api/v2/auth/me returns 401
-          # with `CouldNotDecodeClaim(DecodingFailure at .roles: Missing required
-          # field)`. Restore the mapper block to fix.
+          - name: roles
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            consentRequired: false
+            config:
+              claim.name: "roles"
+              jsonType.label: String
+              multivalued: "true"
+              userinfo.token.claim: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              usermodel.clientRoleMapping.clientId: quine-enterprise-client
           - name: audience-quine-enterprise-client
             protocol: openid-connect
             protocolMapper: oidc-audience-mapper
