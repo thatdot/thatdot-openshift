@@ -21,7 +21,7 @@ spec:
   source:
     repoURL: https://github.com/thatdot/thatdot-openshift
     path: manifests/product
-    targetRevision: main
+    targetRevision: debug-access-claims-map-loop
   destination:
     server: https://kubernetes.default.svc
     namespace: openshift-gitops
