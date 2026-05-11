@@ -32,12 +32,37 @@ fi
 # so the developer sees the full picture in a single run.
 failed=()
 
+# Note on `--ignore-missing-schemas`:
+#   kubeconform validates against built-in Kubernetes schemas only. Custom
+#   resources (ArgoCD Application, OLM Subscription/OperatorGroup, OpenShift
+#   Route, CassandraDatacenter, Keycloak, KeycloakRealmImport) are skipped
+#   rather than failed. To close the gap, pre-download the schemas we want
+#   from https://github.com/datreeio/CRDs-catalog into ci/schemas/ and add
+#   --schema-location flags pointing at the local paths. kubeconform v0.7.0
+#   doesn't expose a `lower` template fn, so the catalog can't be referenced
+#   by URL directly (datreeio's filenames are lowercase; {{.ResourceKind}}
+#   renders PascalCase). Future work.
+
 echo "==> yamllint"
 yamllint . || failed+=("yamllint")
 
 echo ""
 echo "==> shellcheck scripts/*.sh ci/*.sh"
 shellcheck scripts/*.sh ci/*.sh || failed+=("shellcheck")
+
+echo ""
+echo "==> kubeconform bootstrap/*.yaml"
+# argocd-customizations.yaml is a patch payload (no apiVersion/kind/metadata),
+# not a complete manifest — kubeconform would correctly reject it. Skip.
+for f in bootstrap/*.yaml; do
+    case "$f" in
+        bootstrap/argocd-customizations.yaml) continue ;;
+    esac
+    echo "  --- $f ---"
+    if ! kubeconform --strict --ignore-missing-schemas --summary "$f"; then
+        failed+=("$f")
+    fi
+done
 
 echo ""
 echo "==> kustomize + kubeconform per leaf"
