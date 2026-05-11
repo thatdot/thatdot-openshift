@@ -17,6 +17,19 @@ kind: CassandraDatacenter
 metadata:
   name: dc1
   namespace: thatdot-openshift
+  annotations:
+    # Wave 1 — applied after wave 0 (operator subscription + RoleBinding) is
+    # Synced. ArgoCD's built-in Subscription health check keeps wave 0
+    # Progressing until the CSV is Succeeded, so cass-operator's CRDs exist
+    # by the time this CR is created.
+    argocd.argoproj.io/sync-wave: "1"
+    # CRD `cassandra.datastax.com/v1beta1` is installed by cass-operator in
+    # wave 0 of this same Application. Without this annotation, ArgoCD's
+    # pre-flight dry-run fails (CRD doesn't exist yet) and aborts the WHOLE
+    # sync — wave 0 never gets a chance to install the operator. This option
+    # tells ArgoCD: skip dry-run when the CRD isn't installed yet, and just
+    # apply when this resource's wave comes up. The CRD will exist by then.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   clusterName: quine
   serverType: cassandra

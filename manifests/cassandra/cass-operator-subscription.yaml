@@ -1,4 +1,11 @@
-# k8ssandra cass-operator install — synced by application-platform.
+# k8ssandra cass-operator install — synced by application-cassandra.
+#
+# Layout note (step 5 refactor): this Subscription was originally placed in
+# manifests/platform/ in step 3. Step 5 moved it into manifests/cassandra/
+# alongside the CassandraDatacenter CR it reconciles, matching the
+# single-Application-boundary pattern used for the Keycloak stack. Net effect:
+# `oc delete application cassandra` cleans up the whole stack (operator sub +
+# RoleBinding + CR), and a fresh sync re-installs everything.
 #
 # Install mode: OwnNamespace. The OperatorGroup lives in `thatdot-openshift` and
 # targets that same namespace, so the operator pod runs alongside the workloads
@@ -6,13 +13,16 @@
 # cluster-scoped `openshift-operators` namespace and conflict with our
 # namespace-scoped GitOps install).
 #
+# The same OperatorGroup `thatdot-openshift-operators` is reused by the RHBK and
+# CNPG operators installed by application-keycloak — its existence is shared
+# infra for any future OwnNamespace operator in this namespace.
+#
 # Package name: `cass-operator-community` (the bare `cass-operator` belongs to a
 # different/conflicting catalog entry).
 #
-# sync-wave "0" inside manifests/platform/: this must reach Healthy (CSV Succeeded)
-# before wave 1 (application-cassandra) tries to apply a CassandraDatacenter CR
-# whose CRD this operator installs. ArgoCD's built-in Subscription health check
-# does the gating.
+# sync-wave "0" inside manifests/cassandra/: the operator must be installed
+# (CSV Succeeded) before wave 1's CassandraDatacenter CR can be created.
+# ArgoCD's built-in Subscription health check does the gating.
 ---
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup

@@ -1,0 +1,494 @@
+# KeycloakRealmImport — declarative realm config for `quine-enterprise`.
+#
+# Behavior to remember (RHBK + upstream Keycloak Operator are identical):
+#   - First reconcile creates a Job that runs `kc.sh import --override`.
+#   - Operator marks `status.conditions[Done]: True` on success.
+#   - Subsequent CR edits are IGNORED. To re-import: delete-and-recreate the CR
+#     (e.g., `oc delete keycloakrealmimport quine-enterprise -n thatdot-openshift`),
+#     or for a full stack reset, `oc delete application keycloak -n openshift-gitops`.
+#
+# Realm contents (ports from ../opstools/keycloak/k8s/realm.json with public-repo-safe edits):
+#   - 1 interactive OIDC client: quine-enterprise-client
+#     * standardFlowEnabled + directAccessGrantsEnabled (browser + CLI password flows)
+#     * protocolMappers: client-role mapper (→ `resource_access.<client>.roles`) +
+#       audience mapper (→ `aud: quine-enterprise-client`).
+#     * `secret:` OMITTED — operator generates; retrieve with `kcadm.sh`.
+#     * NO redirectUris yet — step 6 adds QE's Route URL.
+#   - 6 client roles on quine-enterprise-client: superadmin, admin, architect,
+#     dataengineer, analyst, billing
+#   - 6 interactive users (admin1, ..., billing1): placeholder passwords with
+#     `temporary: true`. Keycloak forces a password change on first login, so the
+#     committed placeholder is useless after that. Each user has its matching
+#     client role pre-assigned.
+#   - 6 service-account CLI clients (qe-cli-admin, ..., qe-cli-billing):
+#     * serviceAccountsEnabled: true; standardFlow + directAccessGrants disabled.
+#     * Same protocolMappers as the interactive client (roles + audience), so
+#       client_credentials grants produce tokens with `resource_access` + `aud`
+#       claims that QE can validate.
+#     * `secret:` OMITTED on every one — operator generates 6 secrets, retrieved
+#       on demand via kcadm.sh (no static secrets in this public repo).
+#     * Service-account user (`service-account-qe-cli-<role>`) entries assign the
+#       matching client role onto each service account's user record.
+#
+# sync-wave "3": runs after Keycloak (wave 2) is reachable; the import Job
+# needs to talk to the running Keycloak instance.
+---
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: KeycloakRealmImport
+metadata:
+  name: quine-enterprise
+  namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    # CRD `k8s.keycloak.org/KeycloakRealmImport` is installed by RHBK operator
+    # in wave 0 of this same Application. See cassandradatacenter.yaml for the
+    # full explanation of why this annotation is required.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  keycloakCRName: keycloak
+  realm:
+    realm: quine-enterprise
+    displayName: Quine Enterprise
+    enabled: true
+    sslRequired: none   # TLS handled at the Route; pod-internal is plain HTTP
+    accessTokenLifespan: 1800
+    ssoSessionIdleTimeout: 1800
+    ssoSessionMaxLifespan: 36000
+
+    # ---- Client roles (on quine-enterprise-client) ----
+    roles:
+      client:
+        quine-enterprise-client:
+          - name: superadmin
+            description: Full administrative access
+          - name: admin
+            description: Administrative access (operator-level)
+          - name: architect
+            description: Schema/query design + read/write
+          - name: dataengineer
+            description: Ingest pipelines + standing queries
+          - name: analyst
+            description: Read-only query access
+          - name: billing
+            description: Billing/usage visibility
+
+    # ---- Clients ----
+    clients:
+      # === Interactive browser/CLI client (browser OIDC flow + password grant) ===
+      - clientId: quine-enterprise-client
+        name: Quine Enterprise Client
+        description: OAuth client for Quine Enterprise API v2 authentication
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        clientAuthenticatorType: client-secret
+        # secret: OMITTED — Keycloak generates one on first import; retrieve via kcadm.
+        standardFlowEnabled: true        # browser auth code flow (for step 6 wiring)
+        implicitFlowEnabled: false
+        directAccessGrantsEnabled: true  # password grant for CLI/dev convenience
+        serviceAccountsEnabled: false
+        # NOTE: redirectUris intentionally empty — step 6 adds QE's Route URL.
+        redirectUris: []
+        webOrigins: []
+        defaultClientScopes:
+          - web-origins
+          - acr
+          - profile
+          - roles
+          - basic
+          - email
+        protocolMappers:
+          - name: roles
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            consentRequired: false
+            config:
+              claim.name: "resource_access.${client_id}.roles"
+              jsonType.label: String
+              multivalued: "true"
+              userinfo.token.claim: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              usermodel.clientRoleMapping.clientId: quine-enterprise-client
+          - name: audience-quine-enterprise-client
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            consentRequired: false
+            config:
+              included.client.audience: quine-enterprise-client
+              id.token.claim: "true"
+              access.token.claim: "true"
+
+      # === Service-account CLI clients (one per role; client_credentials grant) ===
+      # All six are identical except for clientId. The matching client role is
+      # assigned on the service-account user (see `users:` below).
+      - clientId: qe-cli-superadmin
+        name: Quine Enterprise CLI (superadmin)
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        clientAuthenticatorType: client-secret
+        standardFlowEnabled: false
+        implicitFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: true
+        protocolMappers:
+          - name: roles
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            config:
+              claim.name: "resource_access.quine-enterprise-client.roles"
+              jsonType.label: String
+              multivalued: "true"
+              userinfo.token.claim: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              usermodel.clientRoleMapping.clientId: quine-enterprise-client
+          - name: audience-quine-enterprise-client
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: quine-enterprise-client
+              id.token.claim: "true"
+              access.token.claim: "true"
+
+      - clientId: qe-cli-admin
+        name: Quine Enterprise CLI (admin)
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        clientAuthenticatorType: client-secret
+        standardFlowEnabled: false
+        implicitFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: true
+        protocolMappers:
+          - name: roles
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            config:
+              claim.name: "resource_access.quine-enterprise-client.roles"
+              jsonType.label: String
+              multivalued: "true"
+              userinfo.token.claim: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              usermodel.clientRoleMapping.clientId: quine-enterprise-client
+          - name: audience-quine-enterprise-client
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: quine-enterprise-client
+              id.token.claim: "true"
+              access.token.claim: "true"
+
+      - clientId: qe-cli-architect
+        name: Quine Enterprise CLI (architect)
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        clientAuthenticatorType: client-secret
+        standardFlowEnabled: false
+        implicitFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: true
+        protocolMappers:
+          - name: roles
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            config:
+              claim.name: "resource_access.quine-enterprise-client.roles"
+              jsonType.label: String
+              multivalued: "true"
+              userinfo.token.claim: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              usermodel.clientRoleMapping.clientId: quine-enterprise-client
+          - name: audience-quine-enterprise-client
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: quine-enterprise-client
+              id.token.claim: "true"
+              access.token.claim: "true"
+
+      - clientId: qe-cli-dataengineer
+        name: Quine Enterprise CLI (dataengineer)
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        clientAuthenticatorType: client-secret
+        standardFlowEnabled: false
+        implicitFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: true
+        protocolMappers:
+          - name: roles
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            config:
+              claim.name: "resource_access.quine-enterprise-client.roles"
+              jsonType.label: String
+              multivalued: "true"
+              userinfo.token.claim: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              usermodel.clientRoleMapping.clientId: quine-enterprise-client
+          - name: audience-quine-enterprise-client
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: quine-enterprise-client
+              id.token.claim: "true"
+              access.token.claim: "true"
+
+      - clientId: qe-cli-analyst
+        name: Quine Enterprise CLI (analyst)
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        clientAuthenticatorType: client-secret
+        standardFlowEnabled: false
+        implicitFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: true
+        protocolMappers:
+          - name: roles
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            config:
+              claim.name: "resource_access.quine-enterprise-client.roles"
+              jsonType.label: String
+              multivalued: "true"
+              userinfo.token.claim: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              usermodel.clientRoleMapping.clientId: quine-enterprise-client
+          - name: audience-quine-enterprise-client
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: quine-enterprise-client
+              id.token.claim: "true"
+              access.token.claim: "true"
+
+      - clientId: qe-cli-billing
+        name: Quine Enterprise CLI (billing)
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        clientAuthenticatorType: client-secret
+        standardFlowEnabled: false
+        implicitFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: true
+        protocolMappers:
+          - name: roles
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            config:
+              claim.name: "resource_access.quine-enterprise-client.roles"
+              jsonType.label: String
+              multivalued: "true"
+              userinfo.token.claim: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              usermodel.clientRoleMapping.clientId: quine-enterprise-client
+          - name: audience-quine-enterprise-client
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: quine-enterprise-client
+              id.token.claim: "true"
+              access.token.claim: "true"
+
+    # ---- Users ----
+    # Two flavors: interactive users (placeholder password, temporary:true) and
+    # service-account users (one auto-created per qe-cli-* client; we just add
+    # role mappings via the `serviceAccountClientId` + `clientRoles` fields).
+    users:
+      # === Interactive users (browser OIDC flow + password grant) ===
+      - username: superadmin1
+        enabled: true
+        emailVerified: true
+        firstName: Super
+        lastName: Admin
+        email: superadmin1@example.invalid
+        credentials:
+          - type: password
+            value: placeholder123
+            temporary: true
+        # The `default-roles-<realm>` composite carries view-profile +
+        # manage-account from the built-in `account` client (plus
+        # offline_access and uma_authorization). Keycloak auto-assigns it
+        # to users created via the admin UI, but NOT to users created via
+        # KeycloakRealmImport — without this line, the account console
+        # returns 401 on every API call and the user sees "Something went
+        # wrong" after login. See CLAUDE.md gotchas.
+        realmRoles:
+          - default-roles-quine-enterprise
+        clientRoles:
+          quine-enterprise-client:
+            - superadmin
+
+      - username: admin1
+        enabled: true
+        emailVerified: true
+        firstName: Admin
+        lastName: One
+        email: admin1@example.invalid
+        credentials:
+          - type: password
+            value: placeholder123
+            temporary: true
+        # The `default-roles-<realm>` composite carries view-profile +
+        # manage-account from the built-in `account` client (plus
+        # offline_access and uma_authorization). Keycloak auto-assigns it
+        # to users created via the admin UI, but NOT to users created via
+        # KeycloakRealmImport — without this line, the account console
+        # returns 401 on every API call and the user sees "Something went
+        # wrong" after login. See CLAUDE.md gotchas.
+        realmRoles:
+          - default-roles-quine-enterprise
+        clientRoles:
+          quine-enterprise-client:
+            - admin
+
+      - username: architect1
+        enabled: true
+        emailVerified: true
+        firstName: Architect
+        lastName: One
+        email: architect1@example.invalid
+        credentials:
+          - type: password
+            value: placeholder123
+            temporary: true
+        # The `default-roles-<realm>` composite carries view-profile +
+        # manage-account from the built-in `account` client (plus
+        # offline_access and uma_authorization). Keycloak auto-assigns it
+        # to users created via the admin UI, but NOT to users created via
+        # KeycloakRealmImport — without this line, the account console
+        # returns 401 on every API call and the user sees "Something went
+        # wrong" after login. See CLAUDE.md gotchas.
+        realmRoles:
+          - default-roles-quine-enterprise
+        clientRoles:
+          quine-enterprise-client:
+            - architect
+
+      - username: dataengineer1
+        enabled: true
+        emailVerified: true
+        firstName: Data
+        lastName: Engineer
+        email: dataengineer1@example.invalid
+        credentials:
+          - type: password
+            value: placeholder123
+            temporary: true
+        # The `default-roles-<realm>` composite carries view-profile +
+        # manage-account from the built-in `account` client (plus
+        # offline_access and uma_authorization). Keycloak auto-assigns it
+        # to users created via the admin UI, but NOT to users created via
+        # KeycloakRealmImport — without this line, the account console
+        # returns 401 on every API call and the user sees "Something went
+        # wrong" after login. See CLAUDE.md gotchas.
+        realmRoles:
+          - default-roles-quine-enterprise
+        clientRoles:
+          quine-enterprise-client:
+            - dataengineer
+
+      - username: analyst1
+        enabled: true
+        emailVerified: true
+        firstName: Analyst
+        lastName: One
+        email: analyst1@example.invalid
+        credentials:
+          - type: password
+            value: placeholder123
+            temporary: true
+        # The `default-roles-<realm>` composite carries view-profile +
+        # manage-account from the built-in `account` client (plus
+        # offline_access and uma_authorization). Keycloak auto-assigns it
+        # to users created via the admin UI, but NOT to users created via
+        # KeycloakRealmImport — without this line, the account console
+        # returns 401 on every API call and the user sees "Something went
+        # wrong" after login. See CLAUDE.md gotchas.
+        realmRoles:
+          - default-roles-quine-enterprise
+        clientRoles:
+          quine-enterprise-client:
+            - analyst
+
+      - username: billing1
+        enabled: true
+        emailVerified: true
+        firstName: Billing
+        lastName: One
+        email: billing1@example.invalid
+        credentials:
+          - type: password
+            value: placeholder123
+            temporary: true
+        # The `default-roles-<realm>` composite carries view-profile +
+        # manage-account from the built-in `account` client (plus
+        # offline_access and uma_authorization). Keycloak auto-assigns it
+        # to users created via the admin UI, but NOT to users created via
+        # KeycloakRealmImport — without this line, the account console
+        # returns 401 on every API call and the user sees "Something went
+        # wrong" after login. See CLAUDE.md gotchas.
+        realmRoles:
+          - default-roles-quine-enterprise
+        clientRoles:
+          quine-enterprise-client:
+            - billing
+
+      # === Service-account users — one per qe-cli-* client ===
+      # Username convention is fixed by Keycloak: `service-account-<clientId>`.
+      # `serviceAccountClientId` links this user record to its owning client.
+      # The `clientRoles` block here is the canonical way to attach realm/client
+      # roles to a service account in a realm-import YAML.
+      - username: service-account-qe-cli-superadmin
+        enabled: true
+        serviceAccountClientId: qe-cli-superadmin
+        clientRoles:
+          quine-enterprise-client:
+            - superadmin
+
+      - username: service-account-qe-cli-admin
+        enabled: true
+        serviceAccountClientId: qe-cli-admin
+        clientRoles:
+          quine-enterprise-client:
+            - admin
+
+      - username: service-account-qe-cli-architect
+        enabled: true
+        serviceAccountClientId: qe-cli-architect
+        clientRoles:
+          quine-enterprise-client:
+            - architect
+
+      - username: service-account-qe-cli-dataengineer
+        enabled: true
+        serviceAccountClientId: qe-cli-dataengineer
+        clientRoles:
+          quine-enterprise-client:
+            - dataengineer
+
+      - username: service-account-qe-cli-analyst
+        enabled: true
+        serviceAccountClientId: qe-cli-analyst
+        clientRoles:
+          quine-enterprise-client:
+            - analyst
+
+      - username: service-account-qe-cli-billing
+        enabled: true
+        serviceAccountClientId: qe-cli-billing
+        clientRoles:
+          quine-enterprise-client:
+            - billing

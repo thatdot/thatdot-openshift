@@ -1,0 +1,32 @@
+# Red Hat Build of Keycloak (RHBK) operator install — synced by application-keycloak.
+#
+# Install mode: OwnNamespace. Reuses the existing `thatdot-openshift-operators`
+# OperatorGroup created by manifests/cassandra/cass-operator-subscription.yaml.
+# That OperatorGroup targets `thatdot-openshift`, so this operator's pod will
+# also run in `thatdot-openshift` and watch CRs in that same namespace.
+# (We don't redefine the OperatorGroup here — it's shared infra.)
+#
+# Package + channel verification:
+# Names below are best-known values; verify on first bootstrap with:
+#   oc get packagemanifest rhbk-operator -n openshift-marketplace \
+#     -o jsonpath='{.status.defaultChannel}{"\n"}{.status.channels[*].name}{"\n"}'
+# If `rhbk-operator` isn't found, also try:
+#   oc get packagemanifests -n openshift-marketplace | grep -i keycloak
+# Adjust `spec.name`, `spec.channel`, `spec.source` to match.
+#
+# sync-wave "0" inside manifests/keycloak/: must reach Healthy (CSV Succeeded)
+# before wave 1 (Postgres Cluster CR) and wave 2 (Keycloak CR) can apply.
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: rhbk-operator
+  namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  channel: stable-v26
+  installPlanApproval: Automatic
+  name: rhbk-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace

@@ -1,0 +1,34 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Single-Application boundary for the Keycloak stack: operator subscription,
+# Postgres backing store, Keycloak CR, Route, and realm import all live here
+# and are owned by manifests/platform/application-keycloak.yaml.
+#
+# Motivation: KeycloakRealmImport is create-only (operator marks Done after the
+# first Job runs and ignores subsequent edits). Owning the whole stack in one
+# Application makes `oc delete application keycloak -n openshift-gitops` the
+# natural debug-and-iterate primitive — recreate the whole stack cold, fresh
+# realm import runs.
+#
+# Postgres backing store note: this was originally CloudNativePG via OperatorHub,
+# but the `cloud-native-postgresql` package turned out to be EDB's commercial
+# product (requires a paid pull-secret). We pivoted to a bare Deployment + PVC
+# using Red Hat's OpenShift-aware postgresql-16 image. See postgres.yaml for
+# the full rationale.
+#
+# Internal sync-wave ordering (annotations on the resources themselves):
+#   wave 0:  rhbk-operator-subscription   — install RHBK operator
+#   wave 1:  postgres                     — PVC + Deployment + Service (bare)
+#   wave 2:  keycloak                     — RHBK Keycloak CR
+#            route                        — Edge-terminated Route at the same wave
+#   wave 3:  keycloak-realm-import        — KeycloakRealmImport CR (fire-once)
+#
+# Listed below in wave order for readability — Kustomize sorts by Kind anyway.
+resources:
+  - rhbk-operator-subscription.yaml
+  - postgres.yaml
+  - keycloak.yaml
+  - route.yaml
+  - keycloak-realm-import.yaml
