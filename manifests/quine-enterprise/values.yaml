@@ -102,6 +102,7 @@ extraJdkArgs: >-
   -Dquine.webserver-advertise.address=quine-enterprise-thatdot-openshift.apps-crc.testing
   -Dquine.webserver-advertise.port=443
   -Dquine.webserver-advertise.use-tls=true
+  -Dquine.auth.oidc.full.provider.access-token-audience=quine-enterprise-client
 
 # Volumes for the truststore wiring:
 #   - cluster-ingress-ca: a ConfigMap holding the OpenShift cluster's
