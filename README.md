@@ -2,7 +2,7 @@
 
 Deploy [Quine Enterprise](https://www.thatdot.com/quine-enterprise) on Red Hat OpenShift — Cassandra-backed persistence, Keycloak OIDC for RBAC, all driven by OpenShift GitOps. Targets [OpenShift Local](https://developers.redhat.com/products/openshift-local) (CRC) for dev; same OpenShift bits as production.
 
-For design rationale (why these choices, per-stack briefs, known gaps for production): see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md). For engineering reference (gotchas, operational notes): see [`CLAUDE.md`](./CLAUDE.md).
+For design rationale: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md). For engineering reference (gotchas, operational notes): [`CLAUDE.md`](./CLAUDE.md).
 
 ## Prerequisites
 
@@ -39,11 +39,7 @@ oc login -u kubeadmin -p "<PASSWORD>" https://api.crc.testing:6443
 ./scripts/trust-crc-ca.sh
 ```
 
-Wait ~7-10 min on first cold deploy; watch progress with:
-
-```bash
-oc get application -n openshift-gitops -w   # Ctrl+C when all 6 are Synced + Healthy
-```
+Wait ~7-10 min on first cold deploy; watch progress with `oc get application -n openshift-gitops -w` (Ctrl+C when all 6 are Synced + Healthy).
 
 ## Accessing things
 
@@ -78,67 +74,59 @@ Six interactive users, one per role. All have initial password `placeholder123` 
 ### Shell helpers — drop in `~/.zshrc.local`
 
 ```bash
-# Force a sync immediately (resets ArgoCD's retry-backoff). With sync:{} (no
-# explicit revision), ArgoCD resolves to whatever spec.source.targetRevision
-# points at — the branch tip. Avoid `revision: "HEAD"` here; ArgoCD treats
-# the literal string "HEAD" inconsistently and can sync to a stale commit.
+# Force a sync (resolves to spec.source.targetRevision — the branch tip).
 argo-sync() { oc patch application "${1:?app}" -n openshift-gitops --type=merge \
   -p '{"operation":{"sync":{},"initiatedBy":{"username":"'"$(whoami)"'"}}}'; }
 
-# Force a sync to the exact commit you have checked out locally. Use when
-# `argo-sync` syncs to an older commit than your `git rev-parse HEAD` (e.g.,
-# repo-server git cache is stale, or targetRevision resolves unexpectedly).
+# Force a sync to your local HEAD — use when argo-sync targets a stale commit.
 argo-sync-here() {
   local rev=$(git rev-parse HEAD)
   oc patch application "${1:?app}" -n openshift-gitops --type=merge \
     -p "{\"operation\":{\"sync\":{\"revision\":\"$rev\"},\"initiatedBy\":{\"username\":\"$(whoami)\"}}}"
 }
 
-# Cancel a stuck sync ("operationState.phase: Running" forever)
-argo-abort() { oc patch application "${1:?app}" -n openshift-gitops --type=merge -p '{"operation":null}'; }
-
-# Status across all Apps
+argo-abort()  { oc patch application "${1:?app}" -n openshift-gitops --type=merge -p '{"operation":null}'; }
 argo-status() { oc get application -n openshift-gitops "$@"; }
 ```
 
-Notes:
+After `argo-sync`, confirm the right revision was applied:
 
-- `argocd.argoproj.io/refresh=hard` only re-pulls manifests — it does NOT force a sync and does NOT reset retry-backoff. Use `argo-sync` for that.
-- After `argo-sync`, verify the sync targeted the commit you expected: `oc get application <app> -n openshift-gitops -o jsonpath='{.status.operationState.syncResult.revision}{"\n"}'`. If it's not your latest commit, fall back to `argo-sync-here`.
+```bash
+oc get application <app> -n openshift-gitops -o jsonpath='{.status.operationState.syncResult.revision}{"\n"}'
+# mismatch with `git rev-parse HEAD` → run `argo-sync-here <app>`
+```
+
+### ArgoCD UI
+
+Same operations, with a live resource tree, diff view, and sync history. Open it from "Accessing things" above and click into an Application.
+
+| Button | CLI equivalent |
+|---|---|
+| **SYNC** (tick **REVISION** in the dialog to paste a commit SHA) | `argo-sync` / `argo-sync-here` |
+| **REFRESH** → "Hard Refresh" | (re-pull manifests; doesn't sync) |
+| **TERMINATE** (visible during a running op) | `argo-abort` |
+| **HISTORY AND ROLLBACK** | — |
+
+The resource tree shows live status for every managed resource — click a Job to see pod logs, click a CR for the diff between git and cluster.
 
 ### Edit the Keycloak realm
 
-Realm config lives in `manifests/keycloak/keycloak-realm-import.yaml`. Edits are GitOps-driven with automated re-import:
+Realm config lives in `manifests/keycloak/keycloak-realm-import.yaml`.
 
 ```bash
 $EDITOR manifests/keycloak/keycloak-realm-import.yaml
-git commit -am "add new test user"
-git push
-argo-sync keycloak    # or wait ~3 min for ArgoCD's drift detection
+git commit -am "add new test user" && git push
+argo-sync keycloak    # or wait ~3 min for auto-drift-detection
+oc get jobs -n thatdot-openshift -w   # realm-reset (PreSync) → import → pin-client-secret (PostSync)
 ```
 
-A PreSync hook deletes the realm + CR, ArgoCD re-applies, and a PostSync hook reconciles the client_secret back to the value pinned in the `quine-enterprise-oidc-credentials` Secret. **QE keeps serving throughout** — its session cookies and JWTs remain valid.
+PreSync wipes the old realm + CR; ArgoCD re-applies; PostSync reconciles the client_secret to the value pinned in `quine-enterprise-oidc-credentials`. **QE keeps serving throughout** — its session cookies and JWTs remain valid.
 
-Watch the hooks:
-
-```bash
-oc get jobs -n thatdot-openshift -w    # realm-reset (PreSync) then pin-client-secret (PostSync)
-```
-
-If you don't see `realm-reset` and `pin-client-secret` appear within ~30s, ArgoCD may have synced to an older commit (repo-server caches git state and sometimes lags). Verify and force-correct:
-
-```bash
-# What commit did ArgoCD's last sync actually target?
-oc get application keycloak -n openshift-gitops -o jsonpath='{.status.operationState.syncResult.revision}{"\n"}'
-git rev-parse HEAD    # should match — if not, the next step
-
-# Force a sync to the exact commit you have locally
-argo-sync-here keycloak
-```
+If the hook Jobs don't appear within ~30s, ArgoCD probably synced to a stale commit. Compare `syncResult.revision` to `git rev-parse HEAD` (see the helper notes above) and run `argo-sync-here keycloak`.
 
 ### Mint a bearer token for the API
 
-Six pre-provisioned service-account CLI clients, one per role: `qe-cli-superadmin`, `qe-cli-admin`, `qe-cli-architect`, `qe-cli-dataengineer`, `qe-cli-analyst`, `qe-cli-billing`.
+Six service-account clients, one per role: `qe-cli-superadmin`, `qe-cli-admin`, `qe-cli-architect`, `qe-cli-dataengineer`, `qe-cli-analyst`, `qe-cli-billing`.
 
 ```bash
 CLIENT_ID="qe-cli-admin"   # pick a role
@@ -148,65 +136,35 @@ KC_POD=$(oc get pod -n thatdot-openshift -l app=keycloak -o jsonpath='{.items[0]
 ADMIN_USER=$(oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.username}' | base64 -d)
 ADMIN_PW=$(oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.password}' | base64 -d)
 
-# Extract the client secret via kcadm
 oc exec -n thatdot-openshift "$KC_POD" -- env ADMIN_PW="$ADMIN_PW" /bin/bash -c \
   "/opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master --user $ADMIN_USER --password \"\$ADMIN_PW\"" >/dev/null
 CID=$(oc exec -n thatdot-openshift "$KC_POD" -- /opt/keycloak/bin/kcadm.sh get clients -r quine-enterprise -q exact=true -q "clientId=$CLIENT_ID" --fields id --format csv --noquotes | tail -1 | tr -d '\r')
 CLI_SECRET=$(oc exec -n thatdot-openshift "$KC_POD" -- /opt/keycloak/bin/kcadm.sh get "clients/$CID/client-secret" -r quine-enterprise --fields value --format csv --noquotes | tail -1 | tr -d '\r')
 
-# Mint the token
 TOKEN=$(curl -sk -d "client_id=$CLIENT_ID" -d "client_secret=$CLI_SECRET" -d "grant_type=client_credentials" \
   "https://$KC_ROUTE/realms/quine-enterprise/protocol/openid-connect/token" | jq -r .access_token)
-
-# Use it
 curl -sk -H "Authorization: Bearer $TOKEN" "https://$QE_ROUTE/api/v2/auth/me" | jq
 ```
 
 ### Inspect a user's access token shape
 
-Useful when debugging "why isn't this user getting the right permissions?" or when confirming a realm-config change produced the expected JWT structure. Keycloak's admin console has a built-in "Generated access token" tool that shows the full JSON payload it would mint for a given user — no curl, no password reset, no token decoding.
+Keycloak's admin console has a "Generated access token" tool — shows the JWT payload it would mint for a user, with no curl or password needed.
 
-```bash
-# Get the admin password and Keycloak Route
-oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.username}' | base64 -d; echo
-oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.password}' | base64 -d; echo
-open "https://$(oc get route keycloak -n thatdot-openshift -o jsonpath='{.spec.host}')"
-```
+Open the Keycloak admin console (see "Accessing things"), then: realm switcher → **`quine-enterprise`** → **Clients** → `quine-enterprise-client` → **Client scopes** → **Evaluate** → pick a user → **"Generated access token"**.
 
-Then in the admin UI:
-
-1. Top-left realm switcher → **`quine-enterprise`** (not the default `Keycloak` realm)
-2. Left nav → **Clients** → click `quine-enterprise-client`
-3. Top tabs → **Client scopes** → sub-tab **Evaluate**
-4. **Users** dropdown → pick `superadmin1` (or any other interactive user)
-5. Click **"Generated access token"** in the right pane
-
-Verify the payload has:
-
-- `roles` at the **top level** (not nested under `resource_access.<client>.roles` or similar)
-- `roles` containing the exact PascalCase value(s) for that user (`SuperAdmin`, `Admin`, etc. — case-sensitive)
-- `iss` starting with `https://...`
-- `aud` including `quine-enterprise-client`
-
-The "Generated user info" and "Generated ID token" buttons next to it show what each endpoint returns for the same user.
+Verify `roles` is at the **top level** of the JWT (not nested under `resource_access.*`) and contains the exact PascalCase value(s) for that user (`SuperAdmin`, `Admin`, etc. — case-sensitive).
 
 ### Reset a single workload
 
-The single-Application-boundary layout means each stack is independently resettable:
-
 ```bash
-# Recreate the whole Keycloak stack cold (operator + Postgres + Keycloak + realm)
-# Note: prefer the realm-edit + commit flow above for routine realm changes.
-oc delete application keycloak -n openshift-gitops      # ~5-7 min full cycle
-
-# Same for QE
-oc delete application quine-enterprise -n openshift-gitops
-
-# Cassandra (WIPES DATA — PVC is GC'd by ArgoCD's resources-finalizer)
-oc delete application cassandra -n openshift-gitops
+oc delete application keycloak -n openshift-gitops          # full Keycloak stack cold (~5-7 min)
+oc delete application quine-enterprise -n openshift-gitops  # QE cold
+oc delete application cassandra -n openshift-gitops         # WIPES DATA — PVC GC'd via resources-finalizer
 ```
 
-After a delete, the parent Application's drift detection recreates the child within ~30s. Force with `argo-sync root` if impatient.
+The parent Application's drift detection recreates the child within ~30s. Force with `argo-sync root` if impatient.
+
+For routine realm edits, prefer the GitOps flow above — `oc delete application keycloak` is the heavy hammer.
 
 ### Nuke everything
 
@@ -221,19 +179,12 @@ Or fully fresh cluster: `crc delete && crc start ...` then re-run bootstrap.
 ## Diagnostics
 
 ```bash
-# Application sync + health status
-oc get application -n openshift-gitops
-
-# Pod status across the deployment namespace
-oc get pods -n thatdot-openshift
-
-# Logs from a specific workload
-oc logs -n thatdot-openshift -l app=quine-enterprise --tail=100
-oc logs -n thatdot-openshift -l app=keycloak --tail=100
-oc logs -n thatdot-openshift -l app.kubernetes.io/instance=quine-dc1 --tail=100  # Cassandra
-
-# Inspect a failing pod (init container errors, SCC denials, etc.)
-oc describe pod -n thatdot-openshift <pod-name>
+oc get application -n openshift-gitops                                            # sync + health per Application
+oc get pods -n thatdot-openshift                                                  # pod status across the deployment
+oc logs -n thatdot-openshift -l app=quine-enterprise --tail=100                   # QE
+oc logs -n thatdot-openshift -l app=keycloak --tail=100                           # Keycloak
+oc logs -n thatdot-openshift -l app.kubernetes.io/instance=quine-dc1 --tail=100   # Cassandra
+oc describe pod -n thatdot-openshift <pod-name>                                   # init-container errors, SCC denials
 ```
 
 ## Layout
@@ -250,4 +201,4 @@ docs/              # Customer-facing artifacts
 
 ## Public-repo notice
 
-This repository is public. **No license keys, admin passwords, or TLS private material are committed.** Secrets flow in at deploy time via env vars + `oc create secret`.
+Repository is public. No license keys, admin passwords, or TLS private material are committed — secrets flow in at deploy time via env vars + `oc create secret`.
