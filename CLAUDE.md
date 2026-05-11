@@ -2,16 +2,18 @@
 
 ## What this is
 
-Discovery + first implementation pass to deploy Quine Enterprise into Red Hat OpenShift, on a local OpenShift Local (formerly CRC) cluster. Tracking ticket: **[QU-2539](https://thatdot.atlassian.net/browse/QU-2539)**.
+Reference deployment of Quine Enterprise into Red Hat OpenShift, targeting OpenShift Local (formerly CRC) for dev iteration. Tracking ticket: **[QU-2539](https://thatdot.atlassian.net/browse/QU-2539)**.
 
-The canonical document is **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)** — read it first. It has prerequisites, a 6-step walking-skeleton plan with verification per step, and a TL;DR checklist at the bottom that tracks progress.
+Two companion docs:
+- **[`README.md`](./README.md)** — how to run this (prerequisites, bootstrap, iteration tips, diagnostics).
+- **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)** — design rationale (the *why* behind non-obvious choices, per-stack briefs, cross-cutting patterns, known gaps for production).
 
 ## Critical rules
 
 - **This repo is public on GitHub.** Never commit license keys, admin passwords, customer details, internal cluster URLs, or TLS private material. Secrets flow in via env vars at deploy time → `oc create secret`. Manifests reference secrets by name only.
 - **OpenShift-native lane is the deliberate choice.** When recommending tooling or patterns, default to OpenShift-native equivalents (Operators from OperatorHub, Routes, `service-ca`, OpenShift GitOps) rather than upstream patterns from `enterprise-oauth-reference`.
 - **Manifest-driven, not UI-driven.** All cluster state — operator Subscriptions, Namespaces, ArgoCD Applications, RoleBindings, everything — is expressed as YAML in this repo and applied via `oc apply` (for `bootstrap/` items) or GitOps sync (for `manifests/`). The OperatorHub web console is a *discovery* tool only; never install something through clicks without committing the resulting manifest. This is what makes the eventual production deployment reproducible from a clone.
-- **Semantic naming, not step-numbered.** Files and directories are named by what they *are*, not by which step introduced them. `application-quine-enterprise.yaml`, `manifests/quine-enterprise/`, `manifests/cassandra/`, etc. Step numbers live in branch names (`step-2-basic-qe`) and the `IMPLEMENTATION_PLAN.md`, never in repo paths. (Step 1 used `step-1` paths; that was a v1 mistake corrected during step 2.)
+- **Semantic naming, not step-numbered.** Files and directories are named by what they *are*, not by which step introduced them. `application-quine-enterprise.yaml`, `manifests/quine-enterprise/`, `manifests/cassandra/`, etc. Step numbers live in branch names (`step-2-basic-qe`) and git history, never in repo paths. (Step 1 used `step-1` paths; that was a v1 mistake corrected during step 2.)
 - **Walking-skeleton order matters.** Don't skip ahead from step N to step N+2. Each step's verification is the gate for the next.
 - **Cross-service ordering uses sync-waves *and* `initContainer` probes — complementary layers, both required when there's a dependency.** Sync-waves (annotations on Application CRs and on resources within an Application) order what ArgoCD *applies* — Subscription before its CR-using Applications, platform wrapper before product wrapper, etc. They do *not* gate runtime readiness: ArgoCD reports "Healthy" before services are necessarily serving, and waves don't re-fire on later pod restarts. So every long-running workload that depends on another service MUST also ship an `initContainer` that probes the dep at runtime and exits 0 only once it's reachable. Canonical examples:
   - **TCP probe** for "is the dep listening?" — `manifests/quine-enterprise/patches/wait-for-cassandra.yaml` uses bash `</dev/tcp/HOST/PORT` against `quine-dc1-service:9042`. Good for services where listening means ready (Cassandra accepts CQL connections only when fully bootstrapped).
@@ -63,9 +65,9 @@ oc create secret generic qe-license --from-literal=license-key="$QE_LICENSE_KEY"
 ## File layout
 
 ```
-IMPLEMENTATION_PLAN.md       # canonical plan + checklist (start here)
-README.md                    # external-facing entry point
-CLAUDE.md                    # this file
+README.md                    # external-facing entry point (how to run this)
+docs/ARCHITECTURE.md         # design rationale + per-stack briefs + known gaps
+CLAUDE.md                    # this file (engineering reference)
 .gitignore                   # secret-shaped patterns blocked
 .pre-commit-config.yaml      # gitleaks hook
 
@@ -218,10 +220,10 @@ The first four entries are inherited from `enterprise-oauth-reference`; the rest
 - **QE 1.10.6 emits `:443` explicitly in the redirect_uri even though it's the HTTPS default port.** Result: redirect_uri is `https://host:443/api/v2/auth/callback`, which doesn't match `https://host/*` in Keycloak's literal-string + path-wildcard validation. Register BOTH forms in the realm import's `redirectUris` (and `webOrigins`): `https://host/*` AND `https://host:443/*`. Likely a QE bug worth filing upstream, but no knob for us today.
 - **`config.openshift.io/inject-trusted-cabundle` injects *proxy CAs*, NOT the cluster's own ingress-operator CA.** This trips you up the first time. The label-injected bundle is the cluster Proxy's `additionalTrustBundle` (which on bare CRC is just public Mozilla CAs, on a corporate cluster has whatever proxy CAs are configured). The cluster's *own* ingress CA — the one signing every `*.apps.<cluster>.<domain>` Route — lives separately at `openshift-config-managed/default-ingress-cert`. If a pod needs to validate a Route's TLS chain, neither `inject-trusted-cabundle` nor `service.beta.openshift.io/inject-cabundle` (which is for service-ca) covers it. Use the same source as `scripts/trust-crc-ca.sh`: extract `openshift-config-managed/default-ingress-cert` and write it to a namespaced ConfigMap (see `scripts/create-cluster-ingress-ca-configmap.sh`). Symptom of getting this wrong: `curl --cacert <bundle> https://<route>` returns `SSL certificate problem: self-signed certificate in certificate chain`.
 - **`keytool -importcert` only imports the FIRST cert in a multi-cert PEM file.** OpenShift trust bundles typically have 2-3 certs concatenated. Use awk to split into individual files, loop `keytool -importcert` per file. Canonical pattern: `manifests/quine-enterprise/patches/build-truststore.yaml`.
-- **QE role names in the realm must be exact PascalCase: `SuperAdmin`, `Admin`, `Architect`, `DataEngineer`, `Analyst`, `Billing`.** `quine-auth/.../Role.scala`'s `fromReferenceOrName` is a plain case-sensitive string match against those six references with no case-folding, no aliasing, no separator normalization. `superadmin`, `super-admin`, `super_admin`, `SUPERADMIN`, `dataengineer` — all silently discarded by the decoder, then `.flatten`'d out of the resulting `Set[Role]`. Symptom: login succeeds, `/api/v2/auth/me` returns 200 with `"roles":[], "permissions":[]`, and QE pod logs show `WARN ... Discarding unknown role name: <whatever>`. Distinct from the `claim.name` nested bug (which produces an infinite redirect loop instead). Both bugs are realm-config; both produce broken authorization; this one is the quiet/stealth variant. See `docs/OIDC_REDIRECT_LOOP_POSTMORTEM.md` for the full write-up of both.
+- **QE role names in the realm must be exact PascalCase: `SuperAdmin`, `Admin`, `Architect`, `DataEngineer`, `Analyst`, `Billing`.** `quine-auth/.../Role.scala`'s `fromReferenceOrName` is a plain case-sensitive string match against those six references with no case-folding, no aliasing, no separator normalization. `superadmin`, `super-admin`, `super_admin`, `SUPERADMIN`, `dataengineer` — all silently discarded by the decoder, then `.flatten`'d out of the resulting `Set[Role]`. Symptom: login succeeds, `/api/v2/auth/me` returns 200 with `"roles":[], "permissions":[]`, and QE pod logs show `WARN ... Discarding unknown role name: <whatever>`. Distinct from the `claim.name` nested bug (which produces an infinite redirect loop instead). Both bugs are realm-config; both produce broken authorization; this one is the quiet/stealth variant. Customer-facing diagnostic recipes live at [`docs.thatdot.com/quine-enterprise/learn/oidc-setup`](https://docs.thatdot.com/quine-enterprise/learn/oidc-setup/).
 
 ## When you finish a piece of work
 
-- Update `IMPLEMENTATION_PLAN.md`: cross off the relevant TL;DR checklist item; if you diverged from the plan, edit the affected step rather than letting the plan drift.
+- Update `docs/ARCHITECTURE.md` if you introduced a new architectural decision, a new cross-cutting pattern, or a new gap-for-production item. Don't let the doc drift behind the code.
 - Add the corresponding section to `README.md` so the README is a real walk-through, not a stub.
 - Verify nothing secret-shaped is staged before committing (`git diff --cached`).

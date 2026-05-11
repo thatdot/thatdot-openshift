@@ -2,7 +2,7 @@
 
 Deploy [Quine Enterprise](https://www.thatdot.com/quine-enterprise) on Red Hat OpenShift — Cassandra-backed persistence, Keycloak OIDC for RBAC, all driven by OpenShift GitOps. Targets [OpenShift Local](https://developers.redhat.com/products/openshift-local) (CRC) for dev; same OpenShift bits as production.
 
-For design rationale and implementation history, see [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) and [`CLAUDE.md`](./CLAUDE.md).
+For design rationale (why these choices, per-stack briefs, known gaps for production): see [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md). For engineering reference (gotchas, operational notes): see [`CLAUDE.md`](./CLAUDE.md).
 
 ## Prerequisites
 
