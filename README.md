@@ -17,6 +17,12 @@ export THATDOT_REGISTRY_USERNAME="..."
 export THATDOT_REGISTRY_PASSWORD="..."
 ```
 
+Optional — for reproducing the CI validation checks locally before pushing (`./ci/validate.sh` runs the same checks `.github/workflows/validate.yml` runs):
+
+```bash
+brew install yamllint shellcheck kustomize helm kubeconform
+```
+
 ## First-time setup
 
 ```bash

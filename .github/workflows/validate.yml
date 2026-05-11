@@ -1,0 +1,46 @@
+name: validate
+
+# Pre-merge validation: yamllint, kustomize rendering, kubeconform, shellcheck.
+# Calls the same script developers can run locally — see ci/validate.sh and
+# the README "Optional, for running CI checks locally" line in Prerequisites.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: pip install --quiet yamllint
+
+      - name: Install kustomize
+        run: |
+          curl -sfL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      # helm is required for kustomize's `--enable-helm` flag (renders the
+      # helmCharts: block in manifests/quine-enterprise/).
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.0
+
+      - name: Install kubeconform
+        run: |
+          curl -sfL "https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+
+      # shellcheck is pre-installed on ubuntu-latest runners.
+
+      - name: Run validation
+        run: ./ci/validate.sh
