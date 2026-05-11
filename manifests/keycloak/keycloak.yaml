@@ -29,7 +29,7 @@
 # Keycloak to connect on first start. The Secret is created by bootstrap.sh
 # imperatively, so it pre-exists ArgoCD's first sync.
 ---
-apiVersion: k8s.keycloak.org/v2beta1
+apiVersion: k8s.keycloak.org/v2alpha1
 kind: Keycloak
 metadata:
   name: keycloak
