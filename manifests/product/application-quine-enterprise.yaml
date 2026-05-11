@@ -18,7 +18,7 @@ spec:
   source:
     repoURL: https://github.com/thatdot/thatdot-openshift
     path: manifests/quine-enterprise
-    targetRevision: debug-access-claims-map-loop
+    targetRevision: main
   destination:
     server: https://kubernetes.default.svc
     namespace: thatdot-openshift
