@@ -29,7 +29,8 @@ crc start --pull-secret-file ~/Downloads/pull-secret.txt
 
 # Log in (every shell)
 eval "$(crc oc-env)"
-oc login -u kubeadmin -p "$(crc console --credentials | awk '/kubeadmin/{print $NF}' | tr -d \")" https://api.crc.testing:6443
+crc console --credentials
+oc login -u kubeadmin -p "<PASSWORD>" https://api.crc.testing:6443
 
 # Deploy everything (idempotent — safe to re-run any time)
 ./scripts/bootstrap.sh
@@ -63,14 +64,14 @@ open "https://$(oc get route openshift-gitops-server -n openshift-gitops -o json
 
 Six interactive users, one per role. All have initial password `placeholder123` (forced reset on first login).
 
-| Username | QE role | Permissions |
-|---|---|---|
-| `superadmin1` | SuperAdmin | All 34 |
-| `admin1` | Admin | 8 |
-| `architect1` | Architect | Schema + read/write |
+| Username        | QE role      | Permissions               |
+| --------------- | ------------ | ------------------------- |
+| `superadmin1`   | SuperAdmin   | All 34                    |
+| `admin1`        | Admin        | 8                         |
+| `architect1`    | Architect    | Schema + read/write       |
 | `dataengineer1` | DataEngineer | Ingest + standing queries |
-| `analyst1` | Analyst | Read-only queries |
-| `billing1` | Billing | License/usage UI only |
+| `analyst1`      | Analyst      | Read-only queries         |
+| `billing1`      | Billing      | License/usage UI only     |
 
 ## Iteration tips
 
