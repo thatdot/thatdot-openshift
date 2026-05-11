@@ -42,6 +42,18 @@ metadata:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   instances: 1
+  # Resource requests/limits. Without these, the operator defaults to ~1700Mi
+  # memory request for both the Keycloak pod AND the realm-import Job pod.
+  # On a single-node CRC at 18Gi total, the realm-import pod ends up Pending
+  # with `FailedScheduling: Insufficient memory` once Cassandra + QE + Postgres
+  # are also resident. 768Mi/1Gi is enough headroom for our PoC's traffic
+  # (admin console + OIDC discovery + a small realm) without bloating the
+  # cluster's footprint.
+  resources:
+    requests:
+      memory: 768Mi
+    limits:
+      memory: 1Gi
   db:
     vendor: postgres
     host: keycloak-postgres   # Bare-Postgres Service defined in postgres.yaml
