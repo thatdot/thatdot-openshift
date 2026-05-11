@@ -583,7 +583,7 @@ Clean-slate path — same shape as step 4. Step 5 introduces the platform-wide s
 - **Service-account-role-mappings are easy to get wrong in YAML.** In `KeycloakRealmImport`, attaching a client role to a service-account user requires *two* things: (a) `serviceAccountsEnabled: true` on the client, and (b) a `serviceAccountClientRoles:` block at the realm level that maps `<cli-client-name>` → `quine-enterprise-client` → `[<role>]`. Miss part (b) and the client_credentials grant succeeds but the JWT contains no `roles` claim — QE sees a tokenless principal. The verification's JWT-decode step catches this.
 - **Test users use placeholder passwords with `temporary: true`.** Committing `placeholder123` is fine because Keycloak forces a password change on first login — the committed value is useless after first use. README documents this.
 - **`KeycloakRealmImport` is fire-once-then-stale.** The realm import CR triggers a one-shot Job (`kc.sh import --override`); operator marks `status.conditions[Done]: True` after the Job succeeds and *ignores subsequent edits* to the `realm:` block. This is identical between RHBK and upstream Keycloak Operator. The single-Application layout (operators + Postgres + Keycloak + realm all under `application-keycloak`) is the natural workflow: `oc delete application keycloak` re-creates the CR from cold, which re-triggers the import. See "Reset granularities" below for finer-grained options.
-- **Operator-generated admin password.** Keycloak Operator creates Secret `keycloak-initial-admin` in the same namespace with keys `username` (always `admin`) and `password` (random). Retrieve once, log in, optionally change. Documented in verification.
+- **Operator-generated admin password (and username).** Keycloak Operator creates Secret `keycloak-initial-admin` in the same namespace with keys `username` and `password` (both random/Red-Hat-defaulted). **RHBK 26.4 sets the username to `temp-admin`, not `admin`** — verified at step-5 implementation time, but don't hardcode it; always read both keys from the Secret. Retrieve once, log in, optionally change. Documented in verification.
 - **Realm storage requires DB persistence.** This is what makes the "Keycloak survives pod restart" win condition meaningful — see Verification.
 
 **Reset granularities for iteration**
@@ -628,11 +628,13 @@ curl -sk "https://$ROUTE/realms/quine-enterprise/.well-known/openid-configuratio
     jq '.issuer, .authorization_endpoint'
 # Both must start with "https://$ROUTE/..." — NOT http://, NOT internal service name
 
-# Retrieve admin password and log into admin console
-oc get secret keycloak-initial-admin -n thatdot-openshift \
-    -o jsonpath='{.data.password}' | base64 -d ; echo
+# Retrieve admin username + password and log into admin console.
+# RHBK 26.4 names the initial admin `temp-admin` (not `admin` as in older versions).
+# Both values live in the keycloak-initial-admin Secret — always read both, don't assume username.
+oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.username}' | base64 -d ; echo
+oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.password}' | base64 -d ; echo
 open "https://$ROUTE"
-# Browser: log in as 'admin' / <password above>
+# Browser: log in with the username + password from above
 # Confirm: 'quine-enterprise' realm visible in dropdown; 6 client roles; 6 test users
 
 # Test user can log in via realm's account console
@@ -642,10 +644,11 @@ open "https://$ROUTE/realms/quine-enterprise/account"
 # Service-account CLI client can mint a bearer token with the right role claim
 # (proves the qe-cli-* clients + role mappings are wired correctly)
 KC_POD=$(oc get pod -n thatdot-openshift -l app=keycloak -o jsonpath='{.items[0].metadata.name}')
-oc exec -n thatdot-openshift "$KC_POD" -- \
-    /opt/keycloak/bin/kcadm.sh config credentials \
-    --server http://localhost:8080 --realm master \
-    --user admin --password "$(oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.password}' | base64 -d)"
+ADMIN_USER=$(oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.username}' | base64 -d)
+ADMIN_PW=$(oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.password}' | base64 -d)
+# Pass password via env (don't shell-interpolate — handles special characters safely).
+oc exec -n thatdot-openshift "$KC_POD" -- env ADMIN_PW="$ADMIN_PW" /bin/bash -c \
+    "/opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master --user $ADMIN_USER --password \"\$ADMIN_PW\""
 # Get the qe-cli-admin client secret:
 CLI_ID=$(oc exec -n thatdot-openshift "$KC_POD" -- \
     /opt/keycloak/bin/kcadm.sh get clients -r quine-enterprise -q clientId=qe-cli-admin --fields id --format csv --noquotes | tail -n1)
@@ -729,7 +732,7 @@ Cross off as completed.
 - [x] **Step 2** — Quine Enterprise standalone (no persistor / in-memory, no RBAC)
 - [x] **Step 3** — Cassandra added (cass-operator); QE persistor switched; persistence verified across pod restart
 - [x] **Step 4** — App-of-apps refactor (clean-slate teardown + 3-level platform/product split; bootstrap.sh shrunk to seed-only)
-- [ ] **Step 5** — Keycloak deployed with `quine-enterprise` realm
+- [x] **Step 5** — Keycloak deployed with `quine-enterprise` realm
 - [ ] **Step 6** — QE RBAC wired against Keycloak
 
 ### Wrap-up
