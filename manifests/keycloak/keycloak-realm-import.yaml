@@ -10,8 +10,13 @@
 # Realm contents (ports from ../opstools/keycloak/k8s/realm.json with public-repo-safe edits):
 #   - 1 interactive OIDC client: quine-enterprise-client
 #     * standardFlowEnabled + directAccessGrantsEnabled (browser + CLI password flows)
-#     * protocolMappers: client-role mapper (→ `resource_access.<client>.roles`) +
+#     * protocolMappers: client-role mapper (→ top-level `roles` claim) +
 #       audience mapper (→ `aud: quine-enterprise-client`).
+#     * NOTE: claim.name MUST be top-level "roles", not nested like
+#       "resource_access.<client>.roles". QE's AccessTokenClaims.decoder reads
+#       `roles` at the JWT root; nesting it causes the /me handler to fail with
+#       `CouldNotDecodeClaim(DecodingFailure at .roles: Missing required field)`.
+#       Discovered the hard way during step 6 debugging.
 #     * `secret:` OMITTED — operator generates; retrieve with `kcadm.sh`.
 #     * NO redirectUris yet — step 6 adds QE's Route URL.
 #   - 6 client roles on quine-enterprise-client: superadmin, admin, architect,
@@ -115,7 +120,7 @@ spec:
             protocolMapper: oidc-usermodel-client-role-mapper
             consentRequired: false
             config:
-              claim.name: "resource_access.${client_id}.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -149,7 +154,7 @@ spec:
             protocol: openid-connect
             protocolMapper: oidc-usermodel-client-role-mapper
             config:
-              claim.name: "resource_access.quine-enterprise-client.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -179,7 +184,7 @@ spec:
             protocol: openid-connect
             protocolMapper: oidc-usermodel-client-role-mapper
             config:
-              claim.name: "resource_access.quine-enterprise-client.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -209,7 +214,7 @@ spec:
             protocol: openid-connect
             protocolMapper: oidc-usermodel-client-role-mapper
             config:
-              claim.name: "resource_access.quine-enterprise-client.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -239,7 +244,7 @@ spec:
             protocol: openid-connect
             protocolMapper: oidc-usermodel-client-role-mapper
             config:
-              claim.name: "resource_access.quine-enterprise-client.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -269,7 +274,7 @@ spec:
             protocol: openid-connect
             protocolMapper: oidc-usermodel-client-role-mapper
             config:
-              claim.name: "resource_access.quine-enterprise-client.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
@@ -299,7 +304,7 @@ spec:
             protocol: openid-connect
             protocolMapper: oidc-usermodel-client-role-mapper
             config:
-              claim.name: "resource_access.quine-enterprise-client.roles"
+              claim.name: "roles"
               jsonType.label: String
               multivalued: "true"
               userinfo.token.claim: "true"
