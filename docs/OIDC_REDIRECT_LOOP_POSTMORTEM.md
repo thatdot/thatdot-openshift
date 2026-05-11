@@ -200,6 +200,113 @@ After the fix, mint an access token via password grant (or look at one in the br
 
 If `roles` is at the top level, `/api/v2/auth/me` will return 200 with the user's roles populated, and the redirect loop will not occur.
 
+## A related bug: role *names* that don't match QE's expected references
+
+After fixing `claim.name` so the JWT carries `roles: [...]` at the top level, you may still observe **"logged in but `/me` returns empty `roles` and `permissions`"**. This is a *different* realm-config bug that's commonly hit in the same session as the claim-location one, but it presents differently — there is no redirect loop, because `AccessTokenClaims.decoder` succeeds. The `roles` claim is structurally valid; the *values* inside it just aren't recognized.
+
+### Where this bug lives
+
+In `quine-auth/src/main/scala/com/thatdot/quine/auth/Role.scala`:
+
+```scala
+def fromReferenceOrName(s: String): Option[Role[P]] = s match {
+  case Role.Admin.reference        | Role.Admin.name        => Some(admin)
+  case Role.Analyst.reference      | Role.Analyst.name      => Some(analyst)
+  case Role.Architect.reference    | Role.Architect.name    => Some(architect)
+  case Role.Billing.reference      | Role.Billing.name      => Some(billing)
+  case Role.DataEngineer.reference | Role.DataEngineer.name => Some(dataEngineer)
+  case Role.SuperAdmin.reference   | Role.SuperAdmin.name   => Some(superAdmin)
+  case _ =>
+    logger.warn(safe"Discarding unknown role name: ${Safe(s)}")
+    None
+}
+```
+
+The role reference strings are **PascalCase, exact-match**: `Admin`, `Analyst`, `Architect`, `Billing`, `DataEngineer`, `SuperAdmin`. There is no case-folding, no aliasing, no namespacing, no separator normalization. `superadmin`, `super-admin`, `super_admin`, `SUPERADMIN`, or any other variant will be silently discarded and an `Option.flatten` will then drop it from the resulting `Set[Role[P]]`. The user authenticates successfully but ends up with `roles: []`.
+
+### How to spot it
+
+QE pod logs will contain WARN lines (one per unrecognized role value, per token verification):
+
+```
+WARN [NotFromActor] com.thatdot.quine.auth.Role$ - Discarding unknown role name: superadmin
+```
+
+Decoding the JWT payload will show roles claim populated but with wrong-cased values:
+
+```json
+{
+  "roles": ["superadmin"],   ← claim is there, but value is wrong case
+  ...
+}
+```
+
+`/api/v2/auth/me` returns 200 with:
+
+```json
+{
+  "subject": "...",
+  "roles": [],          ← empty — values were discarded
+  "permissions": []     ← empty — no roles, no permissions
+}
+```
+
+### The fix
+
+In your Keycloak realm, the **role names** assigned to clients (and the names referenced in `clientRoles:` user assignments) must be the exact strings:
+
+| Role | Required exact spelling |
+|---|---|
+| Super Admin | `SuperAdmin` |
+| Admin | `Admin` |
+| Architect | `Architect` |
+| Data Engineer | `DataEngineer` |
+| Analyst | `Analyst` |
+| Billing | `Billing` |
+
+In a `KeycloakRealmImport`:
+
+```yaml
+roles:
+  client:
+    quine-enterprise-client:
+      - name: SuperAdmin       # ← PascalCase, no spaces, exact
+        description: Full administrative access
+      - name: DataEngineer     # ← Pascal-cased compound; not "data-engineer", not "dataengineer"
+        description: Ingest pipelines + standing queries
+      # ...
+
+users:
+  - username: superadmin1
+    clientRoles:
+      quine-enterprise-client:
+        - SuperAdmin           # ← matches role definition above; case matters
+```
+
+### Why this trips integrators up
+
+Three reasons:
+
+1. **Identity providers normalize differently.** Some IdPs (Azure AD groups, AD via ADFS) emit role names exactly as administrators typed them in the directory. Others (Auth0 rules, some Keycloak setups) lowercase or namespace them by convention. There's no industry-standard convention for the *spelling* of role names — only that they're strings.
+2. **The failure mode is silent.** No 401, no redirect loop, no banner — just an empty roles array. A user who logs in successfully and lands on the dashboard will typically not notice the missing roles until they try to use a feature that's gated by a permission.
+3. **Keycloak's UI is permissive.** You can name a client role `data-engineer` or `dataEngineer` or `DATA_ENGINEER`; Keycloak doesn't care. QE does. This is a hidden contract between QE and the realm config that isn't surfaced anywhere.
+
+### Why QE's design here is also a UX problem
+
+The decoder logs a WARN when it discards an unknown role and otherwise carries on. There's no signal to the *user* — and arguably no signal to an *operator* either, unless they happen to be tailing QE's logs at the moment of an auth attempt. A better design would either:
+
+- Return an explicit `Unauthorized` (or `Forbidden`) when the role claim contains values but none are recognized — making the misconfiguration impossible to ignore; **or**
+- Surface a configurable mapping table (`quine.auth.role-aliases.superadmin = SuperAdmin`) so the integrator can map their IdP's spelling to QE's references without changing the IdP — which is often easier than mutating an enterprise directory.
+
+### Relationship to the redirect loop
+
+| Bug | JWT shape | Decoder result | UX outcome |
+|---|---|---|---|
+| `claim.name` nested | `{ resource_access: { client: { roles: [...] } } }` (no top-level `roles`) | `CouldNotDecodeClaim(.roles: Missing required field)` | **Infinite redirect loop** (this document's main topic) |
+| Role names wrong case | `{ roles: ["superadmin"], ... }` | `claims.roles = Set()` (silently empty) | **Logged in, but every permission check denied** |
+
+Both bugs are *realm-config* errors and both produce broken authorization, but they manifest in opposite ways: one as a denial-of-service loop that's loud and obvious, the other as a stealth "all features disabled" that's quiet and easy to miss.
+
 ## What the QE product should do differently (recommendations)
 
 The root cause is a customer configuration error, but the *user experience* of the failure is genuinely broken. Three product changes would meaningfully improve this:
