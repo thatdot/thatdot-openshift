@@ -46,6 +46,6 @@ spec:
               done
               echo "Keycloak realm is ready. Starting Quine Enterprise."
           volumeMounts:
-            - name: trusted-ca-bundle
+            - name: cluster-ingress-ca
               mountPath: /injected-ca
               readOnly: true

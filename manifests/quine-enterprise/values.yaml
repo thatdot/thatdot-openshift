@@ -91,15 +91,23 @@ extraJdkArgs: >-
   -Djavax.net.ssl.trustStoreType=JKS
 
 # Volumes for the truststore wiring:
-#   - trusted-ca-bundle: the ConfigMap that OpenShift's CNO fills with the
-#     cluster trust bundle. Consumed by the init containers (build-truststore
-#     reads it to build the JKS; wait-for-keycloak uses it as curl --cacert).
+#   - cluster-ingress-ca: a ConfigMap holding the OpenShift cluster's
+#     ingress-operator CA bundle (extracted from
+#     openshift-config-managed/default-ingress-cert by
+#     scripts/create-cluster-ingress-ca-configmap.sh on every bootstrap).
+#     Consumed by the init containers — build-truststore reads it to import
+#     into the JKS; wait-for-keycloak uses it as curl --cacert.
 #   - truststore: emptyDir shared between build-truststore (writes JKS) and
 #     the main QE container (reads JKS via the JVM args above).
+#
+# NB: we deliberately do NOT use the OpenShift `inject-trusted-cabundle` label
+# here. That label injects the cluster's *proxy* CA bundle (public CAs +
+# corporate proxy CAs), NOT the ingress-operator CA we need to validate
+# Keycloak's Route TLS chain. See CLAUDE.md gotcha on this.
 volumes:
-  - name: trusted-ca-bundle
+  - name: cluster-ingress-ca
     configMap:
-      name: trusted-ca-bundle
+      name: cluster-ingress-ca
   - name: truststore
     emptyDir: {}
 

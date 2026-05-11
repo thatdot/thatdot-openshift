@@ -68,7 +68,7 @@ spec:
               done
               echo "Imported $count OpenShift cluster trust bundle certificate(s) into /workspace/cacerts."
           volumeMounts:
-            - name: trusted-ca-bundle
+            - name: cluster-ingress-ca
               mountPath: /injected-ca
               readOnly: true
             - name: truststore

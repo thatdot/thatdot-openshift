@@ -120,6 +120,22 @@ echo "==> Creating namespace-scoped secrets..."
 "$SCRIPT_DIR/create-keycloak-postgres-secret.sh"
 echo ""
 
+# ---- Populate the cluster ingress CA ConfigMap (used by QE's truststore) ----
+# Step 6: QE's JVM needs the cluster ingress CA to validate Keycloak's Route
+# TLS chain. This isn't in any standard trust bundle — OpenShift's
+# `inject-trusted-cabundle` only injects proxy CAs, not the cluster's own
+# ingress CA. We extract it directly from openshift-config-managed and put
+# it in a namespaced ConfigMap that the QE pod mounts.
+#
+# Run BEFORE seeding root so the ConfigMap exists when QE's pod schedules.
+# Cleanup: an earlier iteration of step 6 mistakenly relied on a
+# `trusted-ca-bundle` ConfigMap. If it's still on the cluster, remove it so
+# nothing references the wrong-content version.
+oc delete configmap trusted-ca-bundle -n thatdot-openshift --ignore-not-found
+echo "==> Populating cluster-ingress-ca ConfigMap (for QE JVM truststore)..."
+"$SCRIPT_DIR/create-cluster-ingress-ca-configmap.sh"
+echo ""
+
 # ---- Seed the root Application ----
 # Everything else flows from this single CR. ArgoCD now owns the cascade:
 #   root --> application-platform (wave 0) --> application-cassandra, application-keycloak

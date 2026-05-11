@@ -14,12 +14,15 @@ helmCharts:
 
 # Plain YAML resources merged with the chart's output.
 # - route.yaml: OpenShift Route (chart is vanilla-K8s, not OpenShift-aware)
-# - trusted-ca.yaml: empty ConfigMap with the inject-trusted-cabundle label —
-#   OpenShift CNO fills it with the cluster trust bundle (used by step 6's
-#   build-truststore init container).
+#
+# Note: the `cluster-ingress-ca` ConfigMap that build-truststore + wait-for-keycloak
+# consume is NOT a GitOps-managed resource. It's populated by
+# scripts/create-cluster-ingress-ca-configmap.sh (called from bootstrap.sh)
+# because the source data (openshift-config-managed/default-ingress-cert) is
+# cluster state that we extract at deploy time. ArgoCD would have nothing to
+# diff if we put an empty stub here — the CA value isn't in git.
 resources:
   - route.yaml
-  - trusted-ca.yaml
 
 # Strategic-merge patches applied to the chart-rendered resources.
 #

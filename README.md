@@ -14,8 +14,8 @@ Reference deployment of [Quine Enterprise](https://www.thatdot.com/quine-enterpr
 - `manifests/product/` — synced by `application-product`. ArgoCD Applications for differentiating workloads (today: QE; future: Novelty).
 - `manifests/cassandra/` — leaf synced by `application-cassandra`. **Whole Cassandra stack** in one Application boundary: the cass-operator Subscription (wave 0), the `anyuid` RoleBinding for the namespace's `default` SA (wave 0), and the `CassandraDatacenter` CR (wave 1).
 - `manifests/keycloak/` — leaf synced by `application-keycloak`. **Whole Keycloak stack** in one Application boundary: the RHBK operator Subscription (wave 0), a bare Postgres Deployment+PVC+Service (wave 1), the `Keycloak` CR + edge-terminated Route (wave 2), and the `KeycloakRealmImport` CR that loads the `quine-enterprise` realm (wave 3).
-- `manifests/quine-enterprise/` — leaf synced by `application-quine-enterprise`. Kustomize root that pulls the QE Helm chart from `helm.thatdot.com`, renders with `values.yaml` (OIDC enabled, pointing at the Keycloak Route), adds an OpenShift Route, a `trusted-ca-bundle` ConfigMap (OpenShift CNO injects the cluster trust bundle), and three init-container patches: `build-truststore` (uses `keytool` to build a JKS from the trust bundle + system cacerts), `wait-for-cassandra` (TCP probe), `wait-for-keycloak` (cert-validating HTTPS probe to the realm's OIDC discovery endpoint).
-- `scripts/` — `bootstrap.sh` (idempotent cluster bootstrap, fail-fast on missing env vars; seeds the root Application, waits for the Keycloak realm-import to be Done, then creates the QE OIDC Secret), `trust-crc-ca.sh` (browser trust), `create-license-secret.sh`, `create-thatdot-registry-pull-secret.sh`, `create-keycloak-postgres-secret.sh` (random password for Keycloak's Postgres backing store), `create-qe-oidc-client-secret.sh` (extracts the operator-generated `quine-enterprise-client` secret from Keycloak via `kcadm.sh`, materializes it as the K8s Secret QE consumes). All idempotent — preserve existing Secret values on re-run.
+- `manifests/quine-enterprise/` — leaf synced by `application-quine-enterprise`. Kustomize root that pulls the QE Helm chart from `helm.thatdot.com`, renders with `values.yaml` (OIDC enabled, pointing at the Keycloak Route), adds an OpenShift Route, and three init-container patches: `build-truststore` (uses `keytool` to build a JKS from the cluster ingress CA ConfigMap + system cacerts), `wait-for-cassandra` (TCP probe), `wait-for-keycloak` (cert-validating HTTPS probe to the realm's OIDC discovery endpoint).
+- `scripts/` — `bootstrap.sh` (idempotent cluster bootstrap, fail-fast on missing env vars; seeds the root Application, waits for the Keycloak realm-import to be Done, then creates the QE OIDC Secret), `trust-crc-ca.sh` (browser trust), `create-license-secret.sh`, `create-thatdot-registry-pull-secret.sh`, `create-keycloak-postgres-secret.sh` (random password for Keycloak's Postgres backing store), `create-cluster-ingress-ca-configmap.sh` (extracts the cluster's ingress-operator CA bundle into a `cluster-ingress-ca` ConfigMap — feeds QE's truststore-builder), `create-qe-oidc-client-secret.sh` (extracts the operator-generated `quine-enterprise-client` secret from Keycloak via `kcadm.sh`, materializes it as the K8s Secret QE consumes). All idempotent — preserve existing Secret values on re-run.
 
 ## Target environment
 
@@ -268,17 +268,21 @@ oc delete pod keycloak-0 -n thatdot-openshift
 
 **The TLS-trust problem and our solution:**
 
-QE talks to Keycloak over HTTPS at the public Route URL. Keycloak presents the cluster's wildcard cert, signed by OpenShift's ingress-operator CA — which the JVM doesn't trust by default. Prior thatDot deployments solved this by pre-building a JKS truststore externally and mounting it from a Secret (manual setup, breaks on `crc delete` because the cluster CA regenerates). We instead use:
+QE talks to Keycloak over HTTPS at the public Route URL. Keycloak presents the cluster's wildcard cert, signed by OpenShift's ingress-operator CA — which the JVM doesn't trust by default. Prior thatDot deployments solved this by pre-building a JKS truststore externally and mounting it from a Secret (manual setup, breaks on `crc delete` because the cluster CA regenerates).
 
-1. A ConfigMap labeled `config.openshift.io/inject-trusted-cabundle: "true"` — OpenShift's Cluster Network Operator fills `ca-bundle.crt` with the cluster trust bundle in PEM form.
-2. A `build-truststore` init container (UBI OpenJDK image) that copies the system cacerts, awk-splits the PEM bundle into individual certs, and imports each via `keytool` into a JKS at `/opt/truststore/cacerts`.
+The OpenShift `inject-trusted-cabundle` label *looks* like the right answer at first — but it actually injects the cluster's *proxy* CA bundle (public CAs + corporate proxy CAs), NOT the cluster's own ingress-operator CA that signs the Routes. Verified by `curl --cacert` returning `self-signed certificate in certificate chain` on the first attempt.
+
+The working approach:
+
+1. A small script (`scripts/create-cluster-ingress-ca-configmap.sh`, called from `bootstrap.sh`) extracts the ingress CA from `openshift-config-managed/default-ingress-cert` and creates a `cluster-ingress-ca` ConfigMap in `thatdot-openshift`. Same source as the existing `trust-crc-ca.sh` script (which lands the same CA in the macOS keychain for browser trust).
+2. A `build-truststore` init container (UBI OpenJDK image) copies the system cacerts to an emptyDir, awk-splits the PEM bundle from the ConfigMap, and imports each cert via `keytool` into the JKS at `/opt/truststore/cacerts`.
 3. The main QE container points its JVM at the JKS via `-Djavax.net.ssl.trustStore=/opt/truststore/cacerts`.
 
-Survives `crc delete` cleanly — every pod start rebuilds the truststore from whatever CA the freshly-regenerated cluster has.
+Survives `crc delete` cleanly — every bootstrap re-extracts the CA from the freshly-regenerated cluster, every pod start rebuilds the JKS.
 
 **What was added:**
 
-- `manifests/quine-enterprise/trusted-ca.yaml` — empty ConfigMap with the `inject-trusted-cabundle` label; CNO populates it.
+- `scripts/create-cluster-ingress-ca-configmap.sh` — out-of-band; extracts the cluster ingress CA into a namespaced ConfigMap. Idempotent.
 - `manifests/quine-enterprise/patches/build-truststore.yaml` — first init container; the truststore builder.
 - `manifests/quine-enterprise/patches/wait-for-keycloak.yaml` — third init container; cert-validating HTTPS probe to `/realms/quine-enterprise/.well-known/openid-configuration` (200 = both Keycloak up AND realm imported, in one check).
 - `manifests/quine-enterprise/values.yaml` — `oidc.enabled: true` with explicit `provider.{locationUrl, authorizationUrl, tokenUrl}` (QE 0.5.3 has no auto-discovery), `client.existingSecret.name: quine-enterprise-oidc-credentials`, JVM truststore args, top-level `volumes:` and `volumeMounts:` for the trust bundle + JKS.
@@ -289,7 +293,7 @@ Survives `crc delete` cleanly — every pod start rebuilds the truststore from w
 
 **Gotchas surfaced:**
 
-1. **`config.openshift.io/inject-trusted-cabundle` is a *label*, not an annotation.** Older OpenShift docs sometimes show annotation form; modern docs (4.10+) require the label.
+1. **`config.openshift.io/inject-trusted-cabundle` injects *proxy* CAs, NOT the cluster's own ingress CA.** Initial step-6 build assumed the label-injected ConfigMap would contain the ingress CA — it doesn't. The label-injected ConfigMap holds the cluster Proxy's `additionalTrustBundle` (public CAs + corporate proxy CAs). The cluster's own ingress-operator CA lives at `openshift-config-managed/default-ingress-cert`. Same source `trust-crc-ca.sh` uses for browser trust.
 2. **`keytool -importcert` only imports the FIRST cert in a multi-cert PEM.** OpenShift's trust bundle has 2-3 concatenated certs; awk-splitting the bundle into individual files is the standard workaround.
 3. **`ubi9-minimal` doesn't have curl.** wait-for-keycloak uses full `ubi9` for `curl + bash`. wait-for-cassandra stays on `ubi9-minimal` because bash `/dev/tcp` is sufficient.
 4. **Realm-import is fire-once — applying the redirectUris change requires deleting the CR.** `oc delete keycloakrealmimport quine-enterprise -n thatdot-openshift` → ArgoCD recreates → operator runs a fresh import Job that overwrites the realm contents (interactive users' password resets are wiped — they'll be re-prompted on next login).

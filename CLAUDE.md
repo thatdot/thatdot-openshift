@@ -123,21 +123,23 @@ manifests/                   # GitOps-synced. The 3-level app-of-apps tree:
 
   quine-enterprise/          # LEAF: synced by manifests/product/application-quine-enterprise.yaml.
     kustomization.yaml       #   helmCharts: QE 0.5.3
-                             #   resources:  route.yaml, trusted-ca.yaml
+                             #   resources:  route.yaml
                              #   patches:    build-truststore, wait-for-cassandra, wait-for-keycloak
-    values.yaml              # OIDC enabled, JVM truststore args, ConfigMap+emptyDir volumes
+    values.yaml              # OIDC enabled, JVM truststore args, cluster-ingress-ca + emptyDir vols
     route.yaml
-    trusted-ca.yaml          # ConfigMap with inject-trusted-cabundle label — OpenShift CNO
-                             # fills it with the cluster trust bundle. Consumed by both init
-                             # containers + the main JVM (via the JKS we build).
     patches/
       build-truststore.yaml     # initContainer 1: keytool-builds a JKS from system cacerts +
-                                # the OpenShift trust bundle. Writes to emptyDir /workspace.
+                                # the cluster ingress CA. Writes to emptyDir /workspace.
       wait-for-cassandra.yaml   # initContainer 2: blocks until Cassandra accepts CQL.
                                 # Canonical TCP-probe pattern.
       wait-for-keycloak.yaml    # initContainer 3: cert-validating HTTPS probe to the realm
                                 # OIDC discovery endpoint. Canonical application-layer-probe
                                 # pattern (checks dep AND its config in one HTTP call).
+
+# NB: the `cluster-ingress-ca` ConfigMap that build-truststore + wait-for-keycloak
+# mount is NOT in this tree — it's populated by
+# scripts/create-cluster-ingress-ca-configmap.sh at bootstrap time. Its source
+# (openshift-config-managed/default-ingress-cert) is cluster state, not git state.
 
 scripts/                     # Helper scripts (idempotent)
   bootstrap.sh               # Install GitOps Operator + patch ArgoCD + namespace + secrets + seed root
@@ -151,6 +153,10 @@ scripts/                     # Helper scripts (idempotent)
                                            # creates quine-enterprise-oidc-credentials Secret
                                            # for QE to consume. Called from bootstrap.sh after
                                            # waiting for KeycloakRealmImport Done. Idempotent.
+  create-cluster-ingress-ca-configmap.sh   # extracts openshift-config-managed/default-ingress-cert
+                                           # into a `cluster-ingress-ca` ConfigMap in thatdot-openshift.
+                                           # QE's truststore init container imports from this. Not
+                                           # GitOps-managed because the source is cluster state.
 ```
 
 ## Useful gotchas (from `enterprise-oauth-reference`)
@@ -173,7 +179,8 @@ scripts/                     # Helper scripts (idempotent)
 - **ArgoCD operations can deadlock when sync-waves wait on never-Healthy resources.** With sync-waves + automated sync, ArgoCD applies wave N and waits for all wave-N resources to be Healthy before applying wave N+1. If a wave-N resource enters CrashLoopBackOff, the operation hangs in `operationState.phase: Running` forever — and ArgoCD won't pick up new manifest edits because the current operation is still "in progress." Symptom: `oc get application <name> -o jsonpath='{.status.sync.revision}'` shows the latest Git commit, but the resource on cluster still has the old spec. **Fix:** terminate the stuck operation with `oc patch application <name> -n openshift-gitops --type=merge -p '{"operation":null}'`, then ArgoCD's automated sync picks up the new manifests on its next cycle (force with `argocd.argoproj.io/refresh=hard` annotation if impatient).
 - **`KeycloakRealmImport` does NOT auto-assign `default-roles-<realm>` to imported users.** Users created via Keycloak's admin UI auto-get the `default-roles-<realm>` composite role, which carries `view-profile` + `manage-account` from the built-in `account` client (plus `offline_access`, `uma_authorization`). Users created via `KeycloakRealmImport` do NOT. Symptom: user can log in (sees password-change prompt etc.), but the account console at `/realms/<realm>/account` shows "Something went wrong" because the SPA gets 401 on `/account/?userProfileMetadata=true` (token has no `view-profile`). **Fix:** every user in the realm-import YAML needs `realmRoles: [default-roles-<realm>]` next to its `clientRoles:` block. See `manifests/keycloak/keycloak-realm-import.yaml` for the canonical pattern.
 - **`kcadm.sh get users -q username=X` does PARTIAL MATCH by default — devastating when usernames are substrings of each other.** Querying `username=admin1` will return BOTH `admin1` AND `superadmin1` (because "admin1" is a substring of "superadmin1"). `tail -1` non-deterministically picks one, leading to operations silently hitting the wrong user. **Fix:** always pass `-q exact=true` when looking up users by username: `kcadm.sh get users -r <realm> -q exact=true -q username=admin1`. Same applies to direct REST calls against the admin API — the `/users` endpoint defaults to fuzzy/substring match unless `exact=true` is in the query string. This bit us hard during the step-5 realm-import debugging — half a session of "the import has a role-mapping bug" was actually fuzzy-match hitting the wrong user.
-- **`config.openshift.io/inject-trusted-cabundle` is a *label*, not an annotation.** Used to mark a ConfigMap to receive the cluster trust bundle (populated by OpenShift CNO). Older docs sometimes show annotation form; modern OpenShift (4.10+) requires label form. The CNO fills `data.ca-bundle.crt` with the bundle in PEM format (multiple certs concatenated). For JVM consumption, you need an init container that splits the bundle and runs `keytool -importcert` per cert into a JKS — keytool only imports the first cert in a multi-cert PEM. See `manifests/quine-enterprise/patches/build-truststore.yaml` for the canonical awk-split + keytool-loop pattern.
+- **`config.openshift.io/inject-trusted-cabundle` injects *proxy CAs*, NOT the cluster's own ingress-operator CA.** This trips you up the first time. The label-injected bundle is the cluster Proxy's `additionalTrustBundle` (which on bare CRC is just public Mozilla CAs, on a corporate cluster has whatever proxy CAs are configured). The cluster's *own* ingress CA — the one signing every `*.apps.<cluster>.<domain>` Route — lives separately at `openshift-config-managed/default-ingress-cert`. If a pod needs to validate a Route's TLS chain, neither `inject-trusted-cabundle` nor `service.beta.openshift.io/inject-cabundle` (which is for service-ca) covers it. Use the same source as `scripts/trust-crc-ca.sh`: extract `openshift-config-managed/default-ingress-cert` and write it to a namespaced ConfigMap (see `scripts/create-cluster-ingress-ca-configmap.sh`). Symptom of getting this wrong: `curl --cacert <bundle> https://<route>` returns `SSL certificate problem: self-signed certificate in certificate chain`.
+- **`keytool -importcert` only imports the FIRST cert in a multi-cert PEM file.** OpenShift trust bundles typically have 2-3 certs concatenated. Use awk to split into individual files, loop `keytool -importcert` per file. Canonical pattern: `manifests/quine-enterprise/patches/build-truststore.yaml`.
 
 ## When you finish a piece of work
 
