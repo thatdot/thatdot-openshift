@@ -1,0 +1,100 @@
+# PreSync hook: wipe the realm + the KeycloakRealmImport CR before each sync,
+# so the operator's import Job will re-fire with the latest realm yaml content.
+#
+# Why this is needed:
+#   KeycloakRealmImport is permanently create-only — the operator marks
+#   status.conditions[Done]: True on first import and ignores all subsequent
+#   edits to spec.realm. Even deleting and recreating the CR isn't enough on
+#   its own: the operator's import Job uses `kc.sh import --override=false`,
+#   which finds the existing realm in Keycloak and exits with "Import skipped".
+#   To actually re-import, the realm must NOT exist in Keycloak when the Job
+#   runs. This hook deletes both:
+#     1. The realm in Keycloak (so kc.sh import has somewhere to import to)
+#     2. The CR (so the operator schedules a new import Job)
+#
+# Idempotency / first-install:
+#   On a fresh cluster, neither the realm nor the CR exists yet — both deletes
+#   are no-ops. The hook also exits 0 cleanly if the Keycloak pod isn't up yet,
+#   so first-install ordering (keycloak operator + pod come up DURING this same
+#   sync) doesn't cause a failure.
+#
+# Client_secret pinning vs. this hook:
+#   The PostSync hook (post-sync-pin-client-secret.yaml) overwrites the
+#   operator-generated client_secret with the value in the K8s Secret. Together,
+#   the two hooks make realm re-imports transparent to QE: realm gets rebuilt
+#   from the yaml, then its client_secret is reconciled back to the pinned
+#   value. QE's session cookie and JWT remain valid throughout.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: realm-reset
+  namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: realm-iteration-hook
+      containers:
+        - name: realm-reset
+          # openshift/cli image: just `oc` + bash + curl. Pulled from the
+          # internal ImageStream so no external registry auth is needed.
+          image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+
+              NAMESPACE="thatdot-openshift"
+              REALM="quine-enterprise"
+              CR_NAME="quine-enterprise"
+
+              echo "==> Checking for an existing Keycloak pod..."
+              KC_POD=$(oc get pod -n "$NAMESPACE" -l app=keycloak \
+                  -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null \
+                  | awk '{print $1}' || true)
+
+              if [[ -z "$KC_POD" ]]; then
+                  # No running Keycloak pod — first install, or operator hasn't
+                  # come up yet. Nothing to delete. The wave-1+ resources in this
+                  # same sync will install Keycloak and import the realm fresh.
+                  echo "    No running keycloak pod — first install. Nothing to reset."
+                  exit 0
+              fi
+              echo "    Found Keycloak pod: $KC_POD"
+
+              echo "==> Loading admin credentials from keycloak-initial-admin Secret..."
+              ADMIN_USER=$(oc get secret keycloak-initial-admin -n "$NAMESPACE" \
+                  -o jsonpath='{.data.username}' | base64 -d)
+              ADMIN_PW=$(oc get secret keycloak-initial-admin -n "$NAMESPACE" \
+                  -o jsonpath='{.data.password}' | base64 -d)
+
+              echo "==> Deleting realm '$REALM' in Keycloak (idempotent)..."
+              # kcadm exits non-zero if the realm doesn't exist; tolerate it.
+              # Password passed via env to avoid shell-quoting traps on special chars.
+              oc exec -n "$NAMESPACE" "$KC_POD" -- env ADMIN_PW="$ADMIN_PW" /bin/bash -c "
+                  set -uo pipefail
+                  /opt/keycloak/bin/kcadm.sh config credentials \
+                      --server http://localhost:8080 --realm master \
+                      --user '$ADMIN_USER' --password \"\$ADMIN_PW\" >/dev/null
+                  if /opt/keycloak/bin/kcadm.sh get realms/$REALM >/dev/null 2>&1; then
+                      /opt/keycloak/bin/kcadm.sh delete realms/$REALM
+                      echo '    Realm deleted.'
+                  else
+                      echo '    Realm did not exist — nothing to delete.'
+                  fi
+              "
+
+              echo "==> Deleting KeycloakRealmImport CR '$CR_NAME' (idempotent)..."
+              oc delete keycloakrealmimport "$CR_NAME" -n "$NAMESPACE" \
+                  --ignore-not-found --wait=true
+
+              echo "==> Done. ArgoCD's sync phase will now re-apply the realm-import CR,"
+              echo "    and the operator will run a fresh import Job."

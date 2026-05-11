@@ -110,16 +110,32 @@ manifests/                   # GitOps-synced. The 3-level app-of-apps tree:
     cassandradatacenter.yaml          # CassandraDatacenter CR, sync-wave "1"
 
   keycloak/                  # LEAF: synced by manifests/platform/application-keycloak.yaml.
-                             # KeycloakRealmImport is fire-once — `oc delete application keycloak`
-                             # is the natural workflow for realm-config iteration.
+                             # KeycloakRealmImport is fire-once at the operator level, but the
+                             # Pre/PostSync hook pair below makes realm-config iteration a single
+                             # git commit. `oc delete application keycloak` remains the cold-restart
+                             # primitive (for full-stack debug); not needed for routine realm edits.
     kustomization.yaml
+    hooks-rbac.yaml                   # SA + Role + RoleBinding for the two hooks below.
+                                      # PreSync,PostSync hook at sync-wave "-1" so the SA exists
+                                      # before the wave-0 hook Jobs need it on the first sync.
+    pre-sync-realm-reset.yaml         # PreSync hook (wave "0"): kcadm-deletes the realm and `oc
+                                      # delete keycloakrealmimport`. Idempotent on first install
+                                      # (no-ops if Keycloak isn't up yet). Required because the
+                                      # operator's `kc.sh import --override=false` skips when the
+                                      # realm exists (see KeycloakRealmImport gotcha below).
     rhbk-operator-subscription.yaml   # Subscription, sync-wave "0"
     postgres.yaml                     # Bare Postgres: PVC + Deployment + Service, sync-wave "1"
                                       # (CNPG was the original plan; pivoted because "cloud-native-postgresql"
                                       # in OperatorHub is EDB's paid product — see step 5 gotchas.)
     keycloak.yaml                     # RHBK Keycloak CR, sync-wave "2"
     route.yaml                        # edge-terminated Route, sync-wave "2"
-    keycloak-realm-import.yaml        # KeycloakRealmImport CR, sync-wave "3" (fire-once)
+    keycloak-realm-import.yaml        # KeycloakRealmImport CR, sync-wave "3"
+    post-sync-pin-client-secret.yaml  # PostSync hook (wave "0"): kcadm-overwrites the operator-
+                                      # generated quine-enterprise-client.secret with the value
+                                      # from the quine-enterprise-oidc-credentials Secret.
+                                      # Inverts the dependency: K8s Secret is source of truth,
+                                      # Keycloak is reconciled to match. Result: re-imports
+                                      # don't rotate the client_secret QE consumes.
 
   quine-enterprise/          # LEAF: synced by manifests/product/application-quine-enterprise.yaml.
     kustomization.yaml       #   helmCharts: QE 0.5.3
@@ -148,11 +164,14 @@ scripts/                     # Helper scripts (idempotent)
   create-thatdot-registry-pull-secret.sh   # $THATDOT_REGISTRY_* → thatdot-registry-creds Secret
   create-keycloak-postgres-secret.sh       # random password → keycloak-postgres-app Secret
                                            # (idempotent — preserves existing password on re-run)
-  create-qe-oidc-client-secret.sh          # kcadm.sh against Keycloak pod → extracts the
-                                           # operator-generated quine-enterprise-client secret,
-                                           # creates quine-enterprise-oidc-credentials Secret
-                                           # for QE to consume. Called from bootstrap.sh after
-                                           # waiting for KeycloakRealmImport Done. Idempotent.
+  create-qe-oidc-credentials-secret.sh     # Generates a random client_secret and creates the
+                                           # quine-enterprise-oidc-credentials Secret directly
+                                           # (no Keycloak interaction). The post-sync-pin-client-
+                                           # secret hook then pushes this value INTO Keycloak,
+                                           # so the K8s Secret is the source of truth. Called
+                                           # from bootstrap.sh BEFORE seeding root (so the hook
+                                           # has the Secret to read when it fires). Idempotent —
+                                           # preserves existing value on re-run.
   create-cluster-ingress-ca-configmap.sh   # extracts openshift-config-managed/default-ingress-cert
                                            # into a `cluster-ingress-ca` ConfigMap in thatdot-openshift.
                                            # QE's truststore init container imports from this. Not
@@ -173,7 +192,12 @@ The first four entries are inherited from `enterprise-oauth-reference`; the rest
 - **Moving image tags require `imagePullPolicy: Always`.** Tags like `:main` get repointed by the registry; `IfNotPresent` would serve the kubelet's stale cache forever. Pinned semver tags (`:0.5.3`) can stay `IfNotPresent`.
 - **The QE 0.5.3 chart supports `imagePullSecrets` natively** (in `values.yaml`). No Kustomize patch needed; just set the field in our values file.
 - Cassandra datacenter name is taken from the CR's `metadata.name` — keep Helm values' `cassandra.localDatacenter` aligned.
-- **`KeycloakRealmImport` is create-only against an empty realm slot.** This is stronger than "fire-once on the CR." The CR itself is fire-once (operator marks `status.Done: True` and ignores edits), BUT even if you delete and recreate the CR, the import Job's default strategy is `IGNORE_EXISTING` — and the CRD has **no `strategy` field to override it**. So `kc.sh import` will run, find the realm already exists in Keycloak, log "Import skipped", and exit successfully with no changes. To actually re-import a realm, the realm must NOT exist in Keycloak at the moment the Job runs. Two paths: (a) **surgical** — `kcadm.sh delete realms/<name>` then delete + recreate the CR; (b) **heavy** — `oc delete application keycloak` to cascade-delete the whole stack and let ArgoCD rebuild. Confirmed empirically during step 6 implementation when re-importing the realm with new `redirectUris` silently no-op'd. The client_secret regenerates on re-import, so the `quine-enterprise-oidc-credentials` K8s Secret also has to be deleted + re-created via `scripts/create-qe-oidc-client-secret.sh`, then QE bounced (`oc rollout restart deploy/quine-enterprise -n thatdot-openshift`).
+- **`KeycloakRealmImport` is create-only against an empty realm slot — automated via Pre/PostSync hooks.** The fundamental constraint: even after deleting and recreating the CR, the import Job's hardcoded `kc.sh import --override=false` finds the existing realm and logs "Import skipped." The CRD exposes no `strategy` field; verified against upstream main (`operator/src/main/java/.../KeycloakRealmImportJobDependentResource.java:170-176`) — Keycloak has had years to add `OVERWRITE_EXISTING` and has not. We work around this with two ArgoCD hooks on the `keycloak` Application:
+  - `manifests/keycloak/pre-sync-realm-reset.yaml` runs before each sync, kcadm-deletes the realm, and `oc delete keycloakrealmimport`. Idempotent on first install (no-ops if Keycloak isn't running yet).
+  - `manifests/keycloak/post-sync-pin-client-secret.yaml` runs after sync, kcadm-overwrites the operator-generated `quine-enterprise-client.secret` with the value from the `quine-enterprise-oidc-credentials` K8s Secret.
+  - Net effect: edit `manifests/keycloak/keycloak-realm-import.yaml`, commit, ArgoCD syncs. QE keeps serving across the re-import because the K8s Secret (QE's source of truth) never changes — only Keycloak's copy gets reconciled.
+  - Manual fallbacks for when ArgoCD isn't doing the work: (a) **surgical** — `kcadm.sh delete realms/<name>` then `oc delete keycloakrealmimport quine-enterprise`; (b) **heavy** — `oc delete application keycloak` to cascade-delete the whole stack. After either, force a sync (`argo-sync keycloak` if you have the shell function, otherwise `oc patch application keycloak ... operation`) to re-trigger the hook pair.
+- **`KeycloakRealmImport.spec.placeholders` does NOT actually substitute placeholders in the realm JSON.** Looks tempting — the spec field exists, the docs imply it works for secrets, the operator does inject the env vars on the import Job pod. BUT the operator's hardcoded `kc.sh import --override=false` command does not enable Keycloak's placeholder-substitution SPI, so `${VAR}` patterns in the realm JSON are imported as literal strings. Verified against upstream main and Keycloak issue [#26275](https://github.com/keycloak/keycloak/issues/26275) (closed 2024 with an unhelpful "got it to work, moved things around" comment but no fix to the operator command). Do not try to pin `quine-enterprise-client.secret` via `spec.placeholders` — use the post-sync kcadm reconciliation pattern above instead.
 - **Operator-CRD chicken-and-egg in single-Application leaves.** When an Application contains both a Subscription (wave 0) and a CR whose CRD that Subscription installs (wave 1+), ArgoCD's pre-flight dry-run fails on the CR ("no matches for kind …") *before* wave 0 even gets a chance to install the operator — fails the whole sync after 5 retries. **Fix:** annotate the CRD-dependent resource with `argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true`. Sync-waves still order the apply correctly; this just disables the pre-flight validation that aborts the whole sync prematurely. Applied to: `CassandraDatacenter`, `Keycloak`, `KeycloakRealmImport`.
 - **Orphan-CSV deadlock after `oc delete application` cascade — and recovery is racy.** When the cascade deletes a Subscription, the CSV stays (OLM owns it, not ArgoCD). On Application recreate, OLM's resolver hits `ConstraintsNotSatisfiable: CSV exists and is not referenced by a subscription, subscription exists, subscription requires the CSV` — a deadlock where the orphan blocks the new Subscription from adopting it. Symptom: Subscription stuck `ResolutionFailed=True`, dependent waves never apply, ArgoCD goes into retry-backoff (`Retrying attempt #5`). **Naive recovery (delete the CSV) often fails** because the InstallPlan stays around and OLM's reconciler recreates the CSV before the Subscription can be re-resolved, putting you right back in the deadlock. **Correct recovery sequence:** (1) `oc delete subscription <name> -n <ns>` (2) `oc delete installplan -n <ns> --all` (3) `oc delete csv <csv-name> -n <ns>` (4) wait ~30s for OLM to settle without the orphan being regenerated, (5) only THEN let ArgoCD recreate the Subscription via drift-detection or by triggering a manual sync on the parent Application. With ArgoCD's `selfHeal: true`, the parent Application may recreate the Subscription mid-cleanup — if that happens, deleting the whole **child** Application (`oc delete application <name>`) is the cleanest hammer: the resources-finalizer cascade clears OLM state in dependency order, then the **parent** Application's drift-detection recreates the child cleanly. Encountered live during step 6 debugging (hit three times before the right sequence stuck).
 - **ArgoCD retry-backoff after 5 failed sync attempts requires explicit reset.** After 5 consecutive sync failures, ArgoCD backs the operation off ~10 min (`Retrying attempt #5 at <future-time>`). The `argocd.argoproj.io/refresh=hard` annotation does NOT reset the retry counter — it just invalidates the manifest cache. To force an immediate sync, set the Application's `operation` field directly: `oc patch application <name> -n openshift-gitops --type=merge -p '{"operation":{"sync":{"revision":"HEAD"},"initiatedBy":{"username":"manual"}}}'`. That's the `oc`-only equivalent of `argocd app sync` from the CLI.

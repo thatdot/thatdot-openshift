@@ -9,8 +9,9 @@ kind: Kustomization
 # Motivation: KeycloakRealmImport is create-only (operator marks Done after the
 # first Job runs and ignores subsequent edits). Owning the whole stack in one
 # Application makes `oc delete application keycloak -n openshift-gitops` the
-# natural debug-and-iterate primitive — recreate the whole stack cold, fresh
-# realm import runs.
+# natural cold-restart primitive — but the steady-state iteration workflow is
+# now the PreSync/PostSync hook pair (see "PreSync hooks" / "PostSync hooks"
+# below). Editing the realm yaml + committing is sufficient to re-import.
 #
 # Postgres backing store note: this was originally CloudNativePG via OperatorHub,
 # but the `cloud-native-postgresql` package turned out to be EDB's commercial
@@ -19,16 +20,33 @@ kind: Kustomization
 # the full rationale.
 #
 # Internal sync-wave ordering (annotations on the resources themselves):
-#   wave 0:  rhbk-operator-subscription   — install RHBK operator
-#   wave 1:  postgres                     — PVC + Deployment + Service (bare)
-#   wave 2:  keycloak                     — RHBK Keycloak CR
-#            route                        — Edge-terminated Route at the same wave
-#   wave 3:  keycloak-realm-import        — KeycloakRealmImport CR (fire-once)
+#   PreSync hooks:
+#     wave -1: hooks-rbac                 — SA + Role + RoleBinding (shared with PostSync)
+#     wave  0: pre-sync-realm-reset       — kcadm-deletes realm + CR (idempotent on first install)
+#   Sync phase:
+#     wave 0:  rhbk-operator-subscription — install RHBK operator
+#     wave 1:  postgres                   — PVC + Deployment + Service (bare)
+#     wave 2:  keycloak                   — RHBK Keycloak CR
+#              route                      — Edge-terminated Route at the same wave
+#     wave 3:  keycloak-realm-import      — KeycloakRealmImport CR (operator creates the import Job)
+#   PostSync hooks:
+#     wave -1: hooks-rbac                 — same SA bundle, re-applied for PostSync phase
+#     wave  0: post-sync-pin-client-secret — kcadm-overwrites the operator-generated client_secret
+#                                           with the value from quine-enterprise-oidc-credentials
+#
+# The Pre+PostSync hook pair makes realm changes a single git commit: PreSync
+# wipes prior state, the Sync phase re-applies the realm-import CR, the operator
+# imports the new realm, PostSync reconciles the client_secret back to the
+# pinned value in K8s. QE keeps serving throughout — its session cookies and
+# JWTs are validated locally, and the client_secret it consumes never changes.
 #
 # Listed below in wave order for readability — Kustomize sorts by Kind anyway.
 resources:
+  - hooks-rbac.yaml
+  - pre-sync-realm-reset.yaml
   - rhbk-operator-subscription.yaml
   - postgres.yaml
   - keycloak.yaml
   - route.yaml
   - keycloak-realm-import.yaml
+  - post-sync-pin-client-secret.yaml

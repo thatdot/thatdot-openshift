@@ -114,10 +114,16 @@ echo ""
 # ---- Create namespace-scoped secrets ----
 # Each create-*-secret.sh script is idempotent (`oc apply --dry-run=client | oc apply -f -`).
 # Required env vars were validated above, so these calls won't fail on missing creds.
+#
+# quine-enterprise-oidc-credentials must exist BEFORE ArgoCD seeds the keycloak
+# Application — the post-sync-pin-client-secret hook reads its `client-secret`
+# key when it reconciles Keycloak's client_secret to the pinned value. If the
+# Secret isn't there, the hook fails fast with an error pointing at this script.
 echo "==> Creating namespace-scoped secrets..."
 "$SCRIPT_DIR/create-license-secret.sh"
 "$SCRIPT_DIR/create-thatdot-registry-pull-secret.sh"
 "$SCRIPT_DIR/create-keycloak-postgres-secret.sh"
+"$SCRIPT_DIR/create-qe-oidc-credentials-secret.sh"
 echo ""
 
 # ---- Populate the cluster ingress CA ConfigMap (used by QE's truststore) ----
@@ -140,56 +146,27 @@ echo ""
 # Everything else flows from this single CR. ArgoCD now owns the cascade:
 #   root --> application-platform (wave 0) --> application-cassandra, application-keycloak
 #        \-> application-product  (wave 1) --> application-quine-enterprise
+#
+# The keycloak Application uses Pre/PostSync hooks (see manifests/keycloak/) to
+# reconcile the client_secret. We deliberately do NOT wait for them here —
+# QE's wait-for-keycloak initContainer holds the QE pod until the realm's OIDC
+# discovery endpoint is up, and ArgoCD's KeycloakRealmImport health check
+# (bootstrap/argocd-customizations.yaml) gates the PostSync timing to "after
+# realm imported". The whole cascade reconciles itself.
 echo "==> Seeding root Application..."
 oc apply -f "$PROJECT_DIR/bootstrap/root-application.yaml"
 echo ""
 
-# ---- Wait for Keycloak realm import to finish, then materialize QE's OIDC Secret ----
-# Step 6 dependency:
-#   The QE OIDC client_secret is operator-generated inside Keycloak (no static
-#   value in git). QE's Helm values reference a `quine-enterprise-oidc-credentials`
-#   K8s Secret that we have to create out-of-band by querying Keycloak via
-#   kcadm.sh. We do that here, AFTER ArgoCD has had time to bring up Keycloak
-#   and import the realm — otherwise the client doesn't exist yet.
-#
-# Wait condition: KeycloakRealmImport `quine-enterprise` reports `Done: True`.
-# That's the latest signal in the Keycloak cascade — it implies the operator
-# is installed, Keycloak is Running, and the realm + clients exist.
-#
-# Timeout: 15 min. Cold-start of the whole cascade is normally ~7-10 min.
-# Re-runs (where everything is already up) settle in seconds.
-echo "==> Waiting for Keycloak realm to be imported (up to 15 min)..."
-WAIT_DEADLINE=$(($(date +%s) + 900))
-while true; do
-    DONE=$(oc get keycloakrealmimport quine-enterprise -n thatdot-openshift \
-        -o jsonpath='{.status.conditions[?(@.type=="Done")].status}' 2>/dev/null || true)
-    if [[ "$DONE" == "True" ]]; then
-        echo "    Realm import is Done."
-        break
-    fi
-    if [[ $(date +%s) -gt $WAIT_DEADLINE ]]; then
-        echo ""
-        echo "ERROR: KeycloakRealmImport not Done within 15 minutes."
-        echo "  Inspect:"
-        echo "    oc get application -n openshift-gitops"
-        echo "    oc get keycloak,keycloakrealmimport -n thatdot-openshift"
-        echo "    oc get pods -n thatdot-openshift"
-        exit 1
-    fi
-    sleep 10
-    echo "    Still waiting (realm-import Done condition: ${DONE:-unset})..."
-done
-echo ""
-
-echo "==> Materializing QE OIDC client_secret as a K8s Secret..."
-"$SCRIPT_DIR/create-qe-oidc-client-secret.sh"
-echo ""
-
 # ---- Done ----
-echo "Done. ArgoCD is bootstrapped; root Application seeded; QE OIDC Secret created."
+echo "Done. ArgoCD is bootstrapped; root Application seeded."
 echo ""
-echo "Watch the cascade complete (QE pulls the new Secret on its next reconcile):"
+echo "Watch the cascade complete:"
 echo "  oc get application -n openshift-gitops -w"
+echo ""
+echo "Realm-config iteration: edit manifests/keycloak/keycloak-realm-import.yaml,"
+echo "  commit, then either wait ~3 min for ArgoCD's auto-sync, or force one with:"
+echo "  oc patch application keycloak -n openshift-gitops --type=merge \\"
+echo "    -p '{\"operation\":{\"sync\":{\"revision\":\"HEAD\"},\"initiatedBy\":{\"username\":\"manual\"}}}'"
 echo ""
 
 ui_host=$(oc -n openshift-gitops get route openshift-gitops-server \
