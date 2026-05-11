@@ -83,13 +83,19 @@ spec:
         publicClient: false
         clientAuthenticatorType: client-secret
         # secret: OMITTED — Keycloak generates one on first import; retrieve via kcadm.
-        standardFlowEnabled: true        # browser auth code flow (for step 6 wiring)
+        standardFlowEnabled: true        # browser auth code flow (step 6)
         implicitFlowEnabled: false
         directAccessGrantsEnabled: true  # password grant for CLI/dev convenience
         serviceAccountsEnabled: false
-        # NOTE: redirectUris intentionally empty — step 6 adds QE's Route URL.
-        redirectUris: []
-        webOrigins: []
+        # QE Route URL on CRC. The redirectUri's wildcard covers QE's OIDC
+        # callback path. webOrigins controls CORS for QE's browser SPA calls
+        # back to Keycloak (e.g., token refresh from JavaScript).
+        # When porting to a real cluster, swap apps-crc.testing for that
+        # cluster's `*.apps.<cluster>.<domain>`.
+        redirectUris:
+          - "https://quine-enterprise-thatdot-openshift.apps-crc.testing/*"
+        webOrigins:
+          - "https://quine-enterprise-thatdot-openshift.apps-crc.testing"
         defaultClientScopes:
           - web-origins
           - acr

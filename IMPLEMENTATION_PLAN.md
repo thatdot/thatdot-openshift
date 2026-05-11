@@ -684,32 +684,113 @@ oc delete pod -n thatdot-openshift -l app=keycloak
 
 **Goal:** Connect QE's OIDC config to Keycloak; verify role-based access end-to-end.
 
-**Architectural placement:** Pure config layer — edits to existing files under `manifests/quine-enterprise/` (the leaf already managed by `application-quine-enterprise`). No new Application CRs, no new wrappers. ArgoCD picks up the changes automatically on commit + push.
+**Architectural placement:** Mostly config layer — edits inside existing leaves (`manifests/quine-enterprise/` and `manifests/keycloak/`) plus one new helper script. No new Application CRs, no new wrappers. ArgoCD picks up the changes automatically on commit + push.
+
+**Architectural decisions baked in**
+
+- **Truststore strategy: init-container builds JKS at pod startup, fully GitOps.** QE's JVM has to trust Keycloak's TLS chain (cluster-wildcard cert signed by OpenShift's ingress-operator CA, NOT in the default JDK cacerts). Prior-art repos (`opstools/keycloak`, `thatdot-auth-services`) used pre-built JKS files mounted from a Secret — out-of-band setup that breaks each `crc delete` (CA regenerates). We instead use a ConfigMap with the `config.openshift.io/inject-trusted-cabundle: "true"` label — OpenShift's CNO fills it with the cluster trust bundle PEM. An init container (`build-truststore`) reads the bundle, splits the multi-cert PEM (awk loop), and imports each cert via `keytool` into a copy of the system cacerts. Result: a JKS that trusts both public CAs (license server) and the cluster CA (Keycloak Route). The main QE container mounts the JKS via emptyDir and points the JVM at it via `-Djavax.net.ssl.trustStore=...`.
+
+- **Realm-aware readiness probe.** Existing `wait-for-cassandra` uses bash `/dev/tcp` for a TCP-listening probe. For Keycloak, we need a stronger signal — both "Keycloak is up" AND "the realm has been imported." `curl -fsS --cacert /injected-ca/ca-bundle.crt https://<route>/realms/quine-enterprise/.well-known/openid-configuration` only returns 200 when both are true. We deliberately validate the cert chain (no `-k`) — same posture QE uses; catches truststore misconfiguration in the init container rather than later in QE's OIDC bootstrap.
+
+- **Explicit OIDC URLs (no auto-discovery).** QE 0.5.3 doesn't support an OIDC `discovery-url` field; it requires `locationUrl`, `authorizationUrl`, `tokenUrl` set explicitly. All three point at the Keycloak Route's hostname (which must match the JWT `iss` claim Keycloak emits — see Keycloak's `hostname.hostname` setting in step 5).
+
+- **Client secret retrieval is out-of-band, idempotent.** The `quine-enterprise-client` secret is operator-generated inside Keycloak at realm-import time; no GitOps-pure way to read it. `scripts/create-qe-oidc-client-secret.sh` runs `kcadm.sh` against the Keycloak pod to fetch the secret, creates the K8s Secret `quine-enterprise-oidc-credentials`. Called from `bootstrap.sh` after waiting on `KeycloakRealmImport.status.conditions[Done] == True`. Idempotent: skips if the Secret already exists, so re-runs of `bootstrap.sh` don't fight with an operator-rotated secret.
+
+- **Realm import update means a realm reset.** Step 6 adds the QE Route URL to `quine-enterprise-client`'s `redirectUris`/`webOrigins`. `KeycloakRealmImport` is fire-once: editing the YAML doesn't trigger a re-import on the existing cluster. We accept the realm-reset to apply the change (`oc delete keycloakrealmimport quine-enterprise` → ArgoCD recreates → fresh import wipes user state including the password reset already done on `admin1`). For cold deploys, the new YAML is what gets imported first time. The "realm reset" gotcha is documented.
 
 **What's added**
-- `manifests/quine-enterprise/values.yaml` — `quine.oidc.*` set to Keycloak's Route discovery URL, client ID (`quine-enterprise-client`), client secret (retrieved from Keycloak admin API, materialized as a K8s Secret out-of-band — see step 5's "Seven operator-generated client secrets" gotcha), claim mappings (`resource_access.quine-enterprise-client.roles`).
-- `manifests/quine-enterprise/trusted-ca.yaml` — ConfigMap annotated with `config.openshift.io/inject-trusted-cabundle: "true"` (OpenShift injects the cluster trust bundle, including the ingress-operator CA that signs the Route's wildcard cert). Mounted into the QE pod so the JVM truststore validates Keycloak's Route TLS chain. Different annotation than `service.beta.openshift.io/inject-cabundle` (that one injects the service-ca, which we're NOT using — Keycloak is exposed via the cluster wildcard cert at the Route, not via in-cluster service-ca TLS).
-- Keycloak client redirect URIs updated (in step 5's realm import) to include the QE Route URL. Realm import is fire-once — `oc delete keycloakrealmimport quine-enterprise` to force the re-import (or full-stack reset).
-- **`manifests/quine-enterprise/patches/wait-for-keycloak.yaml` — second init container that probes the realm-specific OIDC discovery endpoint.** Mirrors the wait-for-cassandra pattern but with a stronger readiness signal: `curl -fsSk https://<keycloak-route>/realms/quine-enterprise/.well-known/openid-configuration` only returns 200 when *both* Keycloak is running AND the `quine-enterprise` realm has been imported. One HTTP check covers both dependencies, so QE doesn't start until the OIDC discovery doc is actually serveable. This is more precise than a TCP probe to Keycloak's port 8080 — TCP would succeed before the realm exists, and QE's OIDC bootstrap would then crash on a missing realm.
+- `manifests/quine-enterprise/trusted-ca.yaml` — ConfigMap labeled with `config.openshift.io/inject-trusted-cabundle: "true"` (label, not annotation — modern OpenShift docs are authoritative). Empty `data: {}`; CNO fills `ca-bundle.crt` on first reconcile.
+- `manifests/quine-enterprise/patches/build-truststore.yaml` — Kustomize patch adding the first init container. Image: `registry.access.redhat.com/ubi9/openjdk-21:latest` (has `keytool` + a clean cacerts). Awk-splits the OpenShift PEM bundle (multi-cert), imports each cert into `/workspace/cacerts` via `keytool -importcert`. emptyDir-volume-shared with the main container.
+- `manifests/quine-enterprise/patches/wait-for-keycloak.yaml` — Kustomize patch adding the third init container. Image: `registry.access.redhat.com/ubi9/ubi:latest` (has `bash` + `curl`; `ubi9-minimal` lacks curl). `curl -fsS --cacert /injected-ca/ca-bundle.crt https://<route>/realms/quine-enterprise/.well-known/openid-configuration` loop with `sleep 5`.
+- `manifests/quine-enterprise/values.yaml` updates — `oidc.enabled: true` with explicit `provider.{locationUrl, authorizationUrl, tokenUrl}` + `loginPath: "auth"`; `client.existingSecret.name: quine-enterprise-oidc-credentials`; JVM args gain `-Djavax.net.ssl.trustStore=/opt/truststore/cacerts -Djavax.net.ssl.trustStorePassword=changeit -Djavax.net.ssl.trustStoreType=JKS`; new top-level `volumes:` (referencing the `trusted-ca-bundle` ConfigMap + an emptyDir `truststore`) and `volumeMounts:` (the main container reads the JKS at `/opt/truststore`).
+- `manifests/quine-enterprise/kustomization.yaml` updates — `resources:` adds `trusted-ca.yaml`; `patches:` now lists three patches (build-truststore → wait-for-cassandra → wait-for-keycloak; that's the init-container execution order).
+- `manifests/keycloak/keycloak-realm-import.yaml` updates — `quine-enterprise-client.redirectUris: ["https://quine-enterprise-thatdot-openshift.apps-crc.testing/*"]` and `.webOrigins: ["https://quine-enterprise-thatdot-openshift.apps-crc.testing"]`.
+- `scripts/create-qe-oidc-client-secret.sh` — idempotent; queries Keycloak via `kcadm.sh` to extract the client secret, creates the K8s Secret with both `clientSecret`/`clientId` and `client-secret`/`client-id` keys (hedge against chart key-name conventions until verified empirically).
+- `scripts/bootstrap.sh` updates — after seeding the root Application, polls `oc get keycloakrealmimport quine-enterprise -o jsonpath='{.status.conditions[?(@.type=="Done")].status}'` until `True` (15-min timeout, 10-s poll interval), then calls `create-qe-oidc-client-secret.sh`.
 
-Note on TLS: the curl uses `-k` (skip verification) because the probe is checking *availability*, not authenticity. The OpenShift router presents the cluster's wildcard cert at the Route, which the pod's UBI image truststore doesn't recognize by default. We could mount the service-ca bundle to validate properly, but `-k` is sufficient for an internal-cluster readiness probe and keeps the patch small. If you change QE to validate the issuer cert chain in production (step 6 ConfigMap with CA bundle), the probe can be tightened to drop `-k`.
+**Iteration ritual:** Step 6 modifies *two* leaves — `manifests/quine-enterprise/` (new ConfigMap, two new init-container patches, OIDC config in values.yaml) and `manifests/keycloak/` (client redirectUris/webOrigins in the realm-import). Both chains converge at root, so the on-branch set is: `root`, `application-platform`, `application-product`, `application-keycloak`, `application-quine-enterprise` — 5 spots. Only `application-cassandra` stays on `main`. Branch name: `configure-rbac`. Same 5 spots flip back to `main` on PR finale.
 
-**Iteration ritual:** Same dependency-chain rule as step 5 (see step 5's iteration ritual for the underlying logic). Step 6 modifies *two* leaves — `manifests/quine-enterprise/` (new OIDC config + ConfigMap + possible init container) and `manifests/keycloak/` (client redirect URIs added to the realm import). Both chains converge at root, so the on-branch set is: `root`, `application-platform`, `application-product`, `application-keycloak`, `application-quine-enterprise` — 5 spots. Only `application-cassandra` stays on `main`. Same set flips back on PR finale.
+**Order of operations**
+
+Step 6 is mostly additive against an already-running cluster, but the realm-import change requires a one-time reset.
+
+1. *(Already done by Claude when files are written)* New files + edits as listed above; 5-spot branch-flip to `configure-rbac`.
+2. Commit + push to `configure-rbac`.
+3. **Force a realm re-import to pick up the new redirectUris.** On the running cluster:
+   ```bash
+   oc delete keycloakrealmimport quine-enterprise -n thatdot-openshift
+   ```
+   ArgoCD's auto-sync recreates the CR within ~30s; the operator runs a fresh import Job; test users' password resets are wiped along with everything else (re-prompted on next login).
+4. Re-run bootstrap so the new wait-for-realm-import logic + secret creation kick in:
+   ```bash
+   ./scripts/bootstrap.sh
+   ```
+   Idempotent — re-applies the customizations patch, waits for the realm-import to be Done, calls `create-qe-oidc-client-secret.sh`. If the Secret already exists, no-op (so re-runs after a `oc delete keycloakrealmimport` produce no Secret churn; the client secret value stays stable across realm re-imports because Keycloak preserves it when re-importing the same client).
+5. Force ArgoCD to refresh QE so the new manifests apply:
+   ```bash
+   oc annotate application quine-enterprise -n openshift-gitops argocd.argoproj.io/refresh=hard --overwrite
+   ```
+6. Watch QE pod roll. Three init containers run in order: build-truststore (~10s) → wait-for-cassandra (~5s on a healthy cluster) → wait-for-keycloak (~5s once the realm is up). Then main QE container starts with the new OIDC config + JVM truststore.
+7. Verify (see below).
+8. Finale: flip the 5 `targetRevision`s back to `main`, merge PR, post-merge `oc apply -f bootstrap/root-application.yaml` from main.
+
+**Gotchas to know in advance**
+
+- **Realm-import is fire-once.** Editing `keycloak-realm-import.yaml` and pushing won't change the running realm. Must `oc delete keycloakrealmimport quine-enterprise` to force a re-import. Step 6 hits this once for the redirectUris change. (See step 5 gotchas.)
+- **Client secret stability across re-imports.** When the realm is re-imported, Keycloak preserves the client's secret (because we don't specify one in the YAML — operator-generated secrets persist across `OVERWRITE_EXISTING` reconciles). So the `quine-enterprise-oidc-credentials` K8s Secret stays valid after the realm reset. If a future change *does* invalidate the client secret, you'd need to delete the K8s Secret and re-run `create-qe-oidc-client-secret.sh`.
+- **The trust-bundle ConfigMap uses a *label*, not an annotation.** Older OpenShift docs sometimes show annotation form; modern docs (4.10+) require the label `config.openshift.io/inject-trusted-cabundle: "true"`. We use the label form.
+- **`keytool -importcert` only imports the FIRST cert in a multi-cert PEM file.** OpenShift's trust bundle typically has 2-3 concatenated certs. The build-truststore script awk-splits the bundle into individual files and imports each — that's the standard workaround.
+- **Volume sharing between init and main containers.** The truststore JKS lives in an `emptyDir` volume defined at the pod level. The init container writes; the main container reads. Both reference the volume by name (`truststore`).
+- **Chart's expected Secret key names.** Prior-art Helm values references `existingSecret.name` but doesn't document which keys the chart reads from it. We populate four key-name variants in the Secret (`clientId`/`clientSecret`/`client-id`/`client-secret`) — once verified empirically which the chart uses, the others can be dropped.
+- **CRC apps domain hardcoded.** Three places carry `keycloak-thatdot-openshift.apps-crc.testing` / `quine-enterprise-thatdot-openshift.apps-crc.testing`: the Keycloak CR's hostname, the realm-import's redirectUris, and the wait-for-keycloak probe URL. Porting to a production cluster swaps `apps-crc.testing` for that cluster's `*.apps.<cluster>.<domain>` in all three.
 
 **Verification**
 
 ```bash
-# Browser: hit the QE Route — should redirect to Keycloak login
-# Log in as 'admin1'; expect to land in QE with admin role
-oc logs -n thatdot-openshift -l app=quine-enterprise | grep -i "oidc\|claim"  # token claims visible
-# Log out; log in as 'analyst1'; confirm restricted access (no admin endpoints)
+# All Application CRs Synced + Healthy
+oc get application -n openshift-gitops
+
+# QE pod is Running with all init containers Completed
+oc get pod -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise \
+    -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,INIT:.status.initContainerStatuses[*].name
+# Expect: 3 init container names — build-truststore, wait-for-cassandra, wait-for-keycloak
+
+# OIDC-related log lines from QE pod startup
+oc logs -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise --tail=200 \
+    | grep -iE 'oidc|keycloak|issuer'
+# Expect: discovery URL resolved, JWKS fetched, no TLS handshake errors.
+
+# Browser test — interactive OIDC flow
+ROUTE=$(oc get route quine-enterprise -n thatdot-openshift -o jsonpath='{.spec.host}')
+open "https://$ROUTE"
+# Expect: redirected to Keycloak login. Log in as admin1 / placeholder123,
+# reset password on first login, get redirected back to QE landing page.
+# Confirm: roles visible in QE UI; admin endpoints accessible.
+# Log out; log in as analyst1; confirm restricted view (no admin endpoints).
+
+# Bearer-token test — service-account flow against QE API
+# (uses the qe-cli-admin client + secret from Keycloak)
+KC_POD=$(oc get pod -n thatdot-openshift -l app=keycloak -o jsonpath='{.items[0].metadata.name}')
+ADMIN_USER=$(oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.username}' | base64 -d)
+ADMIN_PW=$(oc get secret keycloak-initial-admin -n thatdot-openshift -o jsonpath='{.data.password}' | base64 -d)
+KEYCLOAK_ROUTE=$(oc get route keycloak -n thatdot-openshift -o jsonpath='{.spec.host}')
+CLI_SECRET=$(oc exec -n thatdot-openshift "$KC_POD" -- env ADMIN_PW="$ADMIN_PW" /bin/bash -c "
+    /opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master --user $ADMIN_USER --password \"\$ADMIN_PW\" >/dev/null
+    CID=\$(/opt/keycloak/bin/kcadm.sh get clients -r quine-enterprise -q exact=true -q clientId=qe-cli-admin --fields id --format csv --noquotes | tail -1 | tr -d '\r')
+    /opt/keycloak/bin/kcadm.sh get \"clients/\$CID/client-secret\" -r quine-enterprise --fields value --format csv --noquotes | tail -1 | tr -d '\r'
+")
+TOKEN=$(curl -sk -d "client_id=qe-cli-admin" -d "client_secret=$CLI_SECRET" \
+    -d "grant_type=client_credentials" \
+    "https://$KEYCLOAK_ROUTE/realms/quine-enterprise/protocol/openid-connect/token" | jq -r .access_token)
+curl -sk -H "Authorization: Bearer $TOKEN" "https://$ROUTE/api/v2/admin/standing-queries"
+# Expect: 200 with JSON response (admin role authorizes admin endpoints).
 ```
 
 **Done when** all four DoD bullets from the Jira ticket are satisfied:
-- QE reachable via Route with TLS, configured to use Cassandra as persistor ✓
-- OIDC login through Keycloak; logged-in user has expected role ✓
-- Ingest query + standing query running, persistence to Cassandra observable ✓
-- README walks another engineer through the same path ✓
+- QE reachable via Route with TLS, configured to use Cassandra as persistor ✓ (step 3)
+- OIDC login through Keycloak; logged-in user has expected role ✓ (this step)
+- Ingest query + standing query running, persistence to Cassandra observable ✓ (verified once OIDC is in place)
+- README walks another engineer through the same path ✓ (README addendum)
 
 **README addendum** "Step 6: RBAC enabled" — final state. README is now the v1 deliverable.
 

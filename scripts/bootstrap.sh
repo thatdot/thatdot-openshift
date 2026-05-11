@@ -122,16 +122,57 @@ echo ""
 
 # ---- Seed the root Application ----
 # Everything else flows from this single CR. ArgoCD now owns the cascade:
-#   root --> application-platform (wave 0) --> cass-operator-subscription, application-cassandra
+#   root --> application-platform (wave 0) --> application-cassandra, application-keycloak
 #        \-> application-product  (wave 1) --> application-quine-enterprise
 echo "==> Seeding root Application..."
 oc apply -f "$PROJECT_DIR/bootstrap/root-application.yaml"
 echo ""
 
-# ---- Done ----
-echo "Done. ArgoCD is bootstrapped; root Application seeded."
+# ---- Wait for Keycloak realm import to finish, then materialize QE's OIDC Secret ----
+# Step 6 dependency:
+#   The QE OIDC client_secret is operator-generated inside Keycloak (no static
+#   value in git). QE's Helm values reference a `quine-enterprise-oidc-credentials`
+#   K8s Secret that we have to create out-of-band by querying Keycloak via
+#   kcadm.sh. We do that here, AFTER ArgoCD has had time to bring up Keycloak
+#   and import the realm — otherwise the client doesn't exist yet.
+#
+# Wait condition: KeycloakRealmImport `quine-enterprise` reports `Done: True`.
+# That's the latest signal in the Keycloak cascade — it implies the operator
+# is installed, Keycloak is Running, and the realm + clients exist.
+#
+# Timeout: 15 min. Cold-start of the whole cascade is normally ~7-10 min.
+# Re-runs (where everything is already up) settle in seconds.
+echo "==> Waiting for Keycloak realm to be imported (up to 15 min)..."
+WAIT_DEADLINE=$(($(date +%s) + 900))
+while true; do
+    DONE=$(oc get keycloakrealmimport quine-enterprise -n thatdot-openshift \
+        -o jsonpath='{.status.conditions[?(@.type=="Done")].status}' 2>/dev/null || true)
+    if [[ "$DONE" == "True" ]]; then
+        echo "    Realm import is Done."
+        break
+    fi
+    if [[ $(date +%s) -gt $WAIT_DEADLINE ]]; then
+        echo ""
+        echo "ERROR: KeycloakRealmImport not Done within 15 minutes."
+        echo "  Inspect:"
+        echo "    oc get application -n openshift-gitops"
+        echo "    oc get keycloak,keycloakrealmimport -n thatdot-openshift"
+        echo "    oc get pods -n thatdot-openshift"
+        exit 1
+    fi
+    sleep 10
+    echo "    Still waiting (realm-import Done condition: ${DONE:-unset})..."
+done
 echo ""
-echo "Watch the cascade (root → platform → product, ~5-7 min cold-start):"
+
+echo "==> Materializing QE OIDC client_secret as a K8s Secret..."
+"$SCRIPT_DIR/create-qe-oidc-client-secret.sh"
+echo ""
+
+# ---- Done ----
+echo "Done. ArgoCD is bootstrapped; root Application seeded; QE OIDC Secret created."
+echo ""
+echo "Watch the cascade complete (QE pulls the new Secret on its next reconcile):"
 echo "  oc get application -n openshift-gitops -w"
 echo ""
 
