@@ -13,7 +13,10 @@ The canonical document is **[`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md)
 - **Manifest-driven, not UI-driven.** All cluster state — operator Subscriptions, Namespaces, ArgoCD Applications, RoleBindings, everything — is expressed as YAML in this repo and applied via `oc apply` (for `bootstrap/` items) or GitOps sync (for `manifests/`). The OperatorHub web console is a *discovery* tool only; never install something through clicks without committing the resulting manifest. This is what makes the eventual production deployment reproducible from a clone.
 - **Semantic naming, not step-numbered.** Files and directories are named by what they *are*, not by which step introduced them. `application-quine-enterprise.yaml`, `manifests/quine-enterprise/`, `manifests/cassandra/`, etc. Step numbers live in branch names (`step-2-basic-qe`) and the `IMPLEMENTATION_PLAN.md`, never in repo paths. (Step 1 used `step-1` paths; that was a v1 mistake corrected during step 2.)
 - **Walking-skeleton order matters.** Don't skip ahead from step N to step N+2. Each step's verification is the gate for the next.
-- **Cross-service ordering uses sync-waves *and* `initContainer` probes — complementary layers, both required when there's a dependency.** Sync-waves (annotations on Application CRs and on resources within an Application) order what ArgoCD *applies* — Subscription before its CR-using Applications, platform wrapper before product wrapper, etc. They do *not* gate runtime readiness: ArgoCD reports "Healthy" before services are necessarily serving, and waves don't re-fire on later pod restarts. So every long-running workload that depends on another service MUST also ship an `initContainer` that probes the dep at runtime and exits 0 only once it's reachable. Canonical example: `manifests/quine-enterprise/patches/wait-for-cassandra.yaml` (TCP connect via bash `</dev/tcp/HOST/PORT` against `quine-dc1-service:9042`). The init pattern is also resilient to *subsequent* dep outages — every pod restart re-probes rather than crashlooping on connection-refused.
+- **Cross-service ordering uses sync-waves *and* `initContainer` probes — complementary layers, both required when there's a dependency.** Sync-waves (annotations on Application CRs and on resources within an Application) order what ArgoCD *applies* — Subscription before its CR-using Applications, platform wrapper before product wrapper, etc. They do *not* gate runtime readiness: ArgoCD reports "Healthy" before services are necessarily serving, and waves don't re-fire on later pod restarts. So every long-running workload that depends on another service MUST also ship an `initContainer` that probes the dep at runtime and exits 0 only once it's reachable. Canonical examples:
+  - **TCP probe** for "is the dep listening?" — `manifests/quine-enterprise/patches/wait-for-cassandra.yaml` uses bash `</dev/tcp/HOST/PORT` against `quine-dc1-service:9042`. Good for services where listening means ready (Cassandra accepts CQL connections only when fully bootstrapped).
+  - **Application-layer probe** for "is the dep AND its config ready?" — `manifests/quine-enterprise/patches/wait-for-keycloak.yaml` (step 6) curls `/realms/quine-enterprise/.well-known/openid-configuration`. The discovery endpoint only returns 200 when both Keycloak is up AND the realm exists, so one probe covers both the service and the data dependency. Prefer application-layer probes when the readiness signal needs to include "the operator finished its reconcile job," not just "the pod is listening."
+  - **Both patterns are resilient to *subsequent* dep outages** — every pod restart re-probes, so QE waiting for Keycloak after a Keycloak pod bounce just works.
 
 ## Architectural decisions (locked in)
 
@@ -111,8 +114,9 @@ manifests/                   # GitOps-synced. The 3-level app-of-apps tree:
                              # is the natural workflow for realm-config iteration.
     kustomization.yaml
     rhbk-operator-subscription.yaml   # Subscription, sync-wave "0"
-    cnpg-operator-subscription.yaml   # Subscription, sync-wave "0"
-    postgres-cluster.yaml             # CNPG Cluster CR, sync-wave "1"
+    postgres.yaml                     # Bare Postgres: PVC + Deployment + Service, sync-wave "1"
+                                      # (CNPG was the original plan; pivoted because "cloud-native-postgresql"
+                                      # in OperatorHub is EDB's paid product — see step 5 gotchas.)
     keycloak.yaml                     # RHBK Keycloak CR, sync-wave "2"
     route.yaml                        # edge-terminated Route, sync-wave "2"
     keycloak-realm-import.yaml        # KeycloakRealmImport CR, sync-wave "3" (fire-once)
@@ -130,6 +134,8 @@ scripts/                     # Helper scripts (idempotent)
   trust-crc-ca.sh            # Trust CRC ingress CA in macOS keychain (Chrome/Safari)
   create-license-secret.sh   # $QE_LICENSE_KEY → qe-license Secret
   create-thatdot-registry-pull-secret.sh   # $THATDOT_REGISTRY_* → thatdot-registry-creds Secret
+  create-keycloak-postgres-secret.sh       # random password → keycloak-postgres-app Secret
+                                           # (idempotent — preserves existing password on re-run)
 ```
 
 ## Useful gotchas (from `enterprise-oauth-reference`)
@@ -145,7 +151,8 @@ scripts/                     # Helper scripts (idempotent)
 - **The QE 0.5.3 chart supports `imagePullSecrets` natively** (in `values.yaml`). No Kustomize patch needed; just set the field in our values file.
 - Cassandra datacenter name is taken from the CR's `metadata.name` — keep Helm values' `cassandra.localDatacenter` aligned.
 - **`KeycloakRealmImport` is fire-once.** Operator marks the CR `status.Done: True` after the import Job succeeds; subsequent edits to the `realm:` block are ignored. To re-import: `oc delete keycloakrealmimport quine-enterprise -n thatdot-openshift` (drift triggers ArgoCD to recreate it) — or, for a full stack reset, `oc delete application keycloak -n openshift-gitops`. This is why `manifests/keycloak/` uses the single-Application-boundary layout.
-- **Operator-CRD chicken-and-egg in single-Application leaves.** When an Application contains both a Subscription (wave 0) and a CR whose CRD that Subscription installs (wave 1+), ArgoCD's pre-flight dry-run fails on the CR ("no matches for kind …") *before* wave 0 even gets a chance to install the operator — fails the whole sync after 5 retries. **Fix:** annotate the CRD-dependent resource with `argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true`. Sync-waves still order the apply correctly; this just disables the pre-flight validation that aborts the whole sync prematurely. Applied to: `CassandraDatacenter`, `cnpg.io/Cluster`, `Keycloak`, `KeycloakRealmImport`.
+- **Operator-CRD chicken-and-egg in single-Application leaves.** When an Application contains both a Subscription (wave 0) and a CR whose CRD that Subscription installs (wave 1+), ArgoCD's pre-flight dry-run fails on the CR ("no matches for kind …") *before* wave 0 even gets a chance to install the operator — fails the whole sync after 5 retries. **Fix:** annotate the CRD-dependent resource with `argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true`. Sync-waves still order the apply correctly; this just disables the pre-flight validation that aborts the whole sync prematurely. Applied to: `CassandraDatacenter`, `Keycloak`, `KeycloakRealmImport`.
+- **OperatorHub catalog gotcha: "cloud-native-postgresql" is EDB's commercial product.** The `cloud-native-postgresql` package in `certified-operators` is EDB Postgres for Kubernetes, NOT upstream CloudNativePG. Pulls from `docker.enterprisedb.com` and requires a paid subscription. Step 5 originally planned to use it; pivoted to bare Postgres Deployment (see `manifests/keycloak/postgres.yaml`) when this surfaced. If you need an operator-managed Postgres on OpenShift, the free alternative is `crunchy-postgres-operator` — different CR schema, mandatory pgBackRest config. Always verify with `oc describe packagemanifest <pkg> -n openshift-marketplace` and check the actual image registry before committing a Subscription.
 
 ## When you finish a piece of work
 

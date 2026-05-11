@@ -20,12 +20,14 @@
 # Letting the operator manage Ingress would mint a Route with edge termination
 # defaults that may not match — explicit is clearer.
 #
-# DB credentials come from the Secret CNPG generates for `keycloak-postgres`
-# (see postgres-cluster.yaml). Keys: `username`, `password`.
+# DB credentials come from the `keycloak-postgres-app` Secret created
+# out-of-band by `scripts/create-keycloak-postgres-secret.sh` (called from
+# bootstrap.sh). The same Secret is consumed by manifests/keycloak/postgres.yaml
+# to initialize the Postgres user on first boot. Keys: `username`, `password`.
 #
-# sync-wave "2": Wave-1 Postgres Cluster must be reconciled for the
-# `keycloak-postgres-app` Secret to exist. Without it, Keycloak's reconciler
-# would loop on missing secret refs.
+# sync-wave "2": Wave-1 (Postgres Deployment + Service) must be running for
+# Keycloak to connect on first start. The Secret is created by bootstrap.sh
+# imperatively, so it pre-exists ArgoCD's first sync.
 ---
 apiVersion: k8s.keycloak.org/v2beta1
 kind: Keycloak
@@ -42,7 +44,7 @@ spec:
   instances: 1
   db:
     vendor: postgres
-    host: keycloak-postgres-rw   # CNPG primary-writes Service for the keycloak-postgres Cluster
+    host: keycloak-postgres   # Bare-Postgres Service defined in postgres.yaml
     port: 5432
     database: keycloak
     usernameSecret:

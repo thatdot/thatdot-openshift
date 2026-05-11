@@ -6,17 +6,18 @@
 #      (used by manifests/quine-enterprise/kustomization.yaml). Without --enable-helm,
 #      kustomize silently emits nothing for helmCharts and the chart never renders.
 #
-#   2. `resourceHealthChecks` — registers a custom Lua health check for
-#      `CassandraDatacenter` (cass-operator's CR). ArgoCD has no built-in check
-#      for this kind, so without it ArgoCD reports the cassandra Application as
-#      Healthy as soon as the CR is *applied*, regardless of whether Cassandra
-#      is actually serving CQL. The check watches `cassandraOperatorProgress: Ready`
-#      AND the `Ready` condition. This is what makes "wait for Cassandra to actually
-#      be up" something ArgoCD can observe.
+#   2. `resourceHealthChecks` — registers custom Lua health checks for operator
+#      CRs that ArgoCD has no built-in check for. Without these, ArgoCD reports
+#      the owning Application as Healthy as soon as a CR is *applied*, regardless
+#      of whether the operator has finished reconciling it. Each check below
+#      gates Healthy on a specific `status` field/condition the relevant
+#      operator sets when the workload is genuinely ready to serve.
 spec:
   kustomizeBuildOptions: "--enable-helm"
 
   resourceHealthChecks:
+    # --- Cassandra: cass-operator (community-operators) ---
+    # Healthy when cassandraOperatorProgress == "Ready" AND the Ready condition is True.
     - group: cassandra.datastax.com
       kind: CassandraDatacenter
       check: |
@@ -42,4 +43,78 @@ spec:
         end
         hs.status = "Progressing"
         hs.message = "Ready condition not yet True"
+        return hs
+
+    # --- Keycloak: RHBK operator (redhat-operators) ---
+    # Healthy when the `Ready` condition reports True AND `HasErrors` is False.
+    # Without this, the keycloak Application reports Healthy as soon as the CR
+    # is applied, even though the Keycloak pod hasn't booted or even been created
+    # by the operator yet.
+    - group: k8s.keycloak.org
+      kind: Keycloak
+      check: |
+        hs = {}
+        if obj.status == nil or obj.status.conditions == nil then
+          hs.status = "Progressing"
+          hs.message = "Awaiting Keycloak status"
+          return hs
+        end
+        local ready = nil
+        local has_errors = nil
+        for _, condition in ipairs(obj.status.conditions) do
+          if condition.type == "Ready" then ready = condition end
+          if condition.type == "HasErrors" then has_errors = condition end
+        end
+        if has_errors ~= nil and has_errors.status == "True" then
+          hs.status = "Degraded"
+          hs.message = has_errors.message or "Keycloak HasErrors"
+          return hs
+        end
+        if ready ~= nil and ready.status == "True" then
+          hs.status = "Healthy"
+          hs.message = "Keycloak is ready"
+          return hs
+        end
+        hs.status = "Progressing"
+        hs.message = (ready ~= nil and ready.message) or "Ready condition not yet True"
+        return hs
+
+    # --- KeycloakRealmImport: RHBK operator ---
+    # Healthy when the `Done` condition reports True. The operator runs a one-shot
+    # Job and marks Done after the realm has been imported into Keycloak.
+    # Without this, the realm-import CR is reported Healthy on apply, masking
+    # both in-progress imports and import failures.
+    - group: k8s.keycloak.org
+      kind: KeycloakRealmImport
+      check: |
+        hs = {}
+        if obj.status == nil or obj.status.conditions == nil then
+          hs.status = "Progressing"
+          hs.message = "Awaiting realm-import status"
+          return hs
+        end
+        local done = nil
+        local has_errors = nil
+        local started = nil
+        for _, condition in ipairs(obj.status.conditions) do
+          if condition.type == "Done" then done = condition end
+          if condition.type == "HasErrors" then has_errors = condition end
+          if condition.type == "Started" then started = condition end
+        end
+        if has_errors ~= nil and has_errors.status == "True" then
+          hs.status = "Degraded"
+          hs.message = has_errors.message or "Realm import HasErrors"
+          return hs
+        end
+        if done ~= nil and done.status == "True" then
+          hs.status = "Healthy"
+          hs.message = "Realm imported"
+          return hs
+        end
+        hs.status = "Progressing"
+        if started ~= nil and started.status == "True" then
+          hs.message = "Realm import in progress"
+        else
+          hs.message = "Realm import not yet started"
+        end
         return hs

@@ -117,6 +117,7 @@ echo ""
 echo "==> Creating namespace-scoped secrets..."
 "$SCRIPT_DIR/create-license-secret.sh"
 "$SCRIPT_DIR/create-thatdot-registry-pull-secret.sh"
+"$SCRIPT_DIR/create-keycloak-postgres-secret.sh"
 echo ""
 
 # ---- Seed the root Application ----

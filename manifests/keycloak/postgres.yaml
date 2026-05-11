@@ -1,0 +1,134 @@
+# Bare Postgres for Keycloak — PVC + Deployment + Service.
+#
+# Why bare rather than an operator-managed Cluster:
+#   We initially planned to use CloudNativePG via OperatorHub. The
+#   `cloud-native-postgresql` package in the `certified-operators` catalog
+#   turned out to be EDB's COMMERCIAL "EDB Postgres for Kubernetes" product,
+#   pulling images from docker.enterprisedb.com that require a paid subscription
+#   and a pull-secret we don't have. No upstream-CNPG package is shipped in the
+#   curated OperatorHub catalogs (community catalog has Percona/Crunchy; neither
+#   is plain CNPG). Rather than swap in Crunchy (different CR schema, mandatory
+#   backups config), we use a bare Deployment + PVC. For a single-tenant
+#   Keycloak DB on CRC this is the simplest thing that could possibly work and
+#   eliminates a third-party image-pull surface entirely.
+#
+# Image: registry.redhat.io/rhel9/postgresql-16
+#   Red Hat's OpenShift-aware Postgres image. Designed to run under
+#   `restricted-v2` SCC (random UID), reads POSTGRESQL_* env vars on first
+#   start to bootstrap the database + user. The cluster pull-secret installed
+#   at `crc start` time covers this registry.
+#
+# Credentials:
+#   Username + password are read from the `keycloak-postgres-app` Secret, which
+#   bootstrap.sh creates with a randomly-generated password if it doesn't exist
+#   (idempotent — re-runs preserve the existing password). Same Secret is
+#   referenced by the Keycloak CR (keycloak.yaml's db.usernameSecret/passwordSecret).
+#
+# Persistence:
+#   2 Gi PVC against the cluster's default StorageClass. CRC: crc-csi-hostpath-provisioner.
+#
+# sync-wave "1": wave 0 (RHBK operator install) has no causal dependency on
+# Postgres, but wave 2 (the Keycloak CR) consumes Postgres's Service +
+# credentials Secret. Wave 1 here ensures Postgres lands before Keycloak tries
+# to dial it.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: keycloak-postgres-data
+  namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak-postgres
+  namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: keycloak-postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # single PVC, single replica — must stop old pod before starting new
+  selector:
+    matchLabels:
+      app: keycloak-postgres
+  template:
+    metadata:
+      labels:
+        app: keycloak-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: registry.redhat.io/rhel9/postgresql-16:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRESQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-postgres-app
+                  key: username
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-postgres-app
+                  key: password
+            - name: POSTGRESQL_DATABASE
+              value: keycloak
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+          readinessProbe:
+            exec:
+              # Red Hat's image puts an is-ready helper at this path.
+              command: ["/usr/libexec/check-container", "--live"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["/usr/libexec/check-container"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: keycloak-postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-postgres
+  namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  selector:
+    app: keycloak-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+  type: ClusterIP
