@@ -7,11 +7,9 @@ kind: Kustomization
 # stack — operator subscriptions, workload CRs, supporting resources — wired
 # up with intra-leaf sync-waves.
 #
-# As of step 5, no operator subscriptions live at this layer — they were moved
-# into their respective leaves to unify the single-Application-boundary pattern
-# (step 5 moved cass-operator-subscription out; the new Keycloak stack
-# follows the same shape from day one). See step 5's Architectural Decisions
-# in IMPLEMENTATION_PLAN.md.
+# No operator subscriptions live at this layer — they live inside their
+# respective leaves to unify the single-Application-boundary pattern.
+# See "Single-Application boundary per stack" in docs/ARCHITECTURE.md.
 #
 # Both Applications below carry sync-wave "1" (annotations on the resources
 # themselves). They are siblings — applied in parallel by ArgoCD; each waits

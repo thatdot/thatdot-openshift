@@ -1,0 +1,76 @@
+# RBAC for the realm-iteration ArgoCD hooks (pre-sync-realm-reset + post-sync-pin-client-secret).
+#
+# Why these are themselves PreSync/PostSync hook resources at sync-wave "-1":
+#   ArgoCD applies normal Sync-phase resources AFTER PreSync hooks complete.
+#   If we put this ServiceAccount in a normal wave, the FIRST sync's PreSync
+#   hook would fail (no SA exists yet → Job pod can't start). By making the
+#   RBAC bundle itself a hook resource at an earlier wave, ArgoCD creates it
+#   first, waits for Healthy (immediate for SA/Role/RoleBinding), then runs
+#   the wave-0 hook Jobs.
+#
+#   Both phases listed (PreSync,PostSync) so the same SA serves both hooks.
+#
+# `hook-delete-policy: BeforeHookCreation` makes re-runs idempotent: ArgoCD
+# deletes the prior copy before creating a new one each sync.
+#
+# Permissions granted:
+#   - pods get/list           — locate the keycloak pod by label
+#   - pods/exec create        — run kcadm.sh inside the keycloak pod
+#   - secrets get             — read keycloak-initial-admin + quine-enterprise-oidc-credentials
+#   - keycloakrealmimports delete  — re-imports require deleting the prior CR
+#                                    (operator marks status.done:true and would
+#                                     otherwise ignore the re-applied spec)
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: realm-iteration-hook
+  namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/hook: PreSync,PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: realm-iteration-hook
+  namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/hook: PreSync,PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      - "keycloak-initial-admin"
+      - "quine-enterprise-oidc-credentials"
+    verbs: ["get"]
+  - apiGroups: ["k8s.keycloak.org"]
+    resources: ["keycloakrealmimports"]
+    verbs: ["get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: realm-iteration-hook
+  namespace: thatdot-openshift
+  annotations:
+    argocd.argoproj.io/hook: PreSync,PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: realm-iteration-hook
+subjects:
+  - kind: ServiceAccount
+    name: realm-iteration-hook
+    namespace: thatdot-openshift

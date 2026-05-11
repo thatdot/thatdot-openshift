@@ -1,11 +1,18 @@
 # KeycloakRealmImport — declarative realm config for `quine-enterprise`.
 #
 # Behavior to remember (RHBK + upstream Keycloak Operator are identical):
-#   - First reconcile creates a Job that runs `kc.sh import --override`.
+#   - First reconcile creates a Job that runs `kc.sh import --override=false`.
 #   - Operator marks `status.conditions[Done]: True` on success.
-#   - Subsequent CR edits are IGNORED. To re-import: delete-and-recreate the CR
-#     (e.g., `oc delete keycloakrealmimport quine-enterprise -n thatdot-openshift`),
-#     or for a full stack reset, `oc delete application keycloak -n openshift-gitops`.
+#   - Subsequent CR edits are IGNORED. To re-import, the realm AND the CR must
+#     both be deleted (kc.sh import has no overwrite mode the operator exposes,
+#     so even re-creating the CR alone produces "Import skipped").
+#
+# Re-import workflow: edit this file, commit. The pre-sync-realm-reset hook
+# (manifests/keycloak/pre-sync-realm-reset.yaml) deletes the realm + CR before
+# ArgoCD's sync phase re-applies this CR. The post-sync-pin-client-secret hook
+# then reconciles the auto-generated client_secret back to the pinned value
+# stored in the K8s Secret. See the kustomization.yaml header for the full
+# wave/hook ordering. QE is undisturbed across re-imports.
 #
 # Realm contents (ports from ../opstools/keycloak/k8s/realm.json with public-repo-safe edits):
 #   - 1 interactive OIDC client: quine-enterprise-client
@@ -17,7 +24,10 @@
 #       `roles` at the JWT root; nesting it causes the /me handler to fail with
 #       `CouldNotDecodeClaim(DecodingFailure at .roles: Missing required field)`.
 #       Discovered the hard way during step 6 debugging.
-#     * `secret:` OMITTED — operator generates; retrieve with `kcadm.sh`.
+#     * `secret:` OMITTED here — operator auto-generates one during import,
+#       and the post-sync-pin-client-secret hook then overwrites it with the
+#       pinned value from the quine-enterprise-oidc-credentials Secret. The
+#       pinned value never lives in this file (public-repo safe).
 #     * NO redirectUris yet — step 6 adds QE's Route URL.
 #   - 6 client roles on quine-enterprise-client: SuperAdmin, Admin, Architect,
 #     DataEngineer, Analyst, Billing — exact PascalCase. quine-auth's
@@ -34,8 +44,11 @@
 #     * Same protocolMappers as the interactive client (roles + audience), so
 #       client_credentials grants produce tokens with `resource_access` + `aud`
 #       claims that QE can validate.
-#     * `secret:` OMITTED on every one — operator generates 6 secrets, retrieved
-#       on demand via kcadm.sh (no static secrets in this public repo).
+#     * `secret:` OMITTED on every one — operator generates 6 secrets. Unlike
+#       the interactive client, the service-account client secrets are NOT
+#       pinned by a hook; they live in Keycloak and are retrieved on demand via
+#       kcadm.sh by whoever needs to mint a CLI token. No static values in this
+#       public repo.
 #     * Service-account user (`service-account-qe-cli-<role>`) entries assign the
 #       matching client role onto each service account's user record.
 #
