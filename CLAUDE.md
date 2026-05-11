@@ -159,7 +159,9 @@ scripts/                     # Helper scripts (idempotent)
                                            # GitOps-managed because the source is cluster state.
 ```
 
-## Useful gotchas (from `enterprise-oauth-reference`)
+## Useful gotchas
+
+The first four entries are inherited from `enterprise-oauth-reference`; the rest were discovered live during steps 1–6 and are the primary reason this repo is more reliable to reproduce than the prior art.
 
 - QE resource limits: `2Gi` request, `4Gi` limit, `-Xmx2g`. Without these, JVM uses 25% of node RAM and OOM-kills.
 - Cassandra heap: cap to `512m` — CRC has limited memory.

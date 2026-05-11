@@ -19,8 +19,12 @@
 #       Discovered the hard way during step 6 debugging.
 #     * `secret:` OMITTED — operator generates; retrieve with `kcadm.sh`.
 #     * NO redirectUris yet — step 6 adds QE's Route URL.
-#   - 6 client roles on quine-enterprise-client: superadmin, admin, architect,
-#     dataengineer, analyst, billing
+#   - 6 client roles on quine-enterprise-client: SuperAdmin, Admin, Architect,
+#     DataEngineer, Analyst, Billing — exact PascalCase. quine-auth's
+#     Role.fromReferenceOrName does case-sensitive exact string match against
+#     these six references with no aliasing; any other spelling (lowercase,
+#     kebab-case, etc.) is silently discarded by the decoder, producing
+#     "logged in but empty roles". Discovered the hard way during step 6.
 #   - 6 interactive users (admin1, ..., billing1): placeholder passwords with
 #     `temporary: true`. Keycloak forces a password change on first login, so the
 #     committed placeholder is useless after that. Each user has its matching

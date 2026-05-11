@@ -20,7 +20,7 @@ spec:
   source:
     repoURL: https://github.com/thatdot/thatdot-openshift
     path: manifests/platform
-    targetRevision: configure-rbac
+    targetRevision: main
   destination:
     server: https://kubernetes.default.svc
     namespace: openshift-gitops

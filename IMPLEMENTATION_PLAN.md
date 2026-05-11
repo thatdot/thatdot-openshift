@@ -523,7 +523,7 @@ Keycloak addition (the actual new work):
   - `route.yaml` — edge-terminated Route exposing the Keycloak Service on port 8080. `host:` left unset so OpenShift assigns `keycloak-thatdot-openshift.apps-crc.testing`. The Route URL has to be computed *before* `keycloak.yaml`'s `hostname.hostname` is set — see Order of Operations. `sync-wave: "2"`.
   - `keycloak-realm-import.yaml` — `KeycloakRealmImport` CR. `sync-wave: "3"`. Realm `quine-enterprise`, ported from `../opstools/keycloak/k8s/realm.json`. Contents:
     - **1 interactive OIDC client `quine-enterprise-client`** (matches opstools naming) — `protocolMappers` for `roles` (client-role mapper) + `audience` (audience mapper), `standardFlowEnabled: true`, `directAccessGrantsEnabled: true`, `secret:` omitted.
-    - **6 client roles** on `quine-enterprise-client`: `superadmin`, `admin`, `architect`, `dataengineer`, `analyst`, `billing`.
+    - **6 client roles** on `quine-enterprise-client`: `SuperAdmin`, `Admin`, `Architect`, `DataEngineer`, `Analyst`, `Billing` (exact PascalCase — these strings must literally match `quine-auth`'s `Role.<Name>.reference` values, or the QE decoder silently discards them).
     - **6 interactive users** `admin1`...`billing1` — placeholder passwords with `temporary: true`, each pre-assigned the matching client role.
     - **6 service-account CLI clients** `qe-cli-superadmin`...`qe-cli-billing` — `serviceAccountsEnabled: true`, `standardFlowEnabled: false`, `directAccessGrantsEnabled: false`, `publicClient: false`, `secret:` omitted. Each carries a `serviceAccountClientRoles` block mapping the corresponding `quine-enterprise-client` client role onto its built-in service-account user, so a `client_credentials` grant produces a JWT with the right role claim.
     - **No QE redirect URIs yet** on `quine-enterprise-client` — step 6.
@@ -696,15 +696,22 @@ oc delete pod -n thatdot-openshift -l app=keycloak
 
 - **Client secret retrieval is out-of-band, idempotent.** The `quine-enterprise-client` secret is operator-generated inside Keycloak at realm-import time; no GitOps-pure way to read it. `scripts/create-qe-oidc-client-secret.sh` runs `kcadm.sh` against the Keycloak pod to fetch the secret, creates the K8s Secret `quine-enterprise-oidc-credentials`. Called from `bootstrap.sh` after waiting on `KeycloakRealmImport.status.conditions[Done] == True`. Idempotent: skips if the Secret already exists, so re-runs of `bootstrap.sh` don't fight with an operator-rotated secret.
 
-- **Realm import update means a realm reset.** Step 6 adds the QE Route URL to `quine-enterprise-client`'s `redirectUris`/`webOrigins`. `KeycloakRealmImport` is fire-once: editing the YAML doesn't trigger a re-import on the existing cluster. We accept the realm-reset to apply the change (`oc delete keycloakrealmimport quine-enterprise` → ArgoCD recreates → fresh import wipes user state including the password reset already done on `admin1`). For cold deploys, the new YAML is what gets imported first time. The "realm reset" gotcha is documented.
+- **Realm import update means a realm reset — and it must actually be reset, not just CR-recreated.** Step 6 adds the QE Route URL to `quine-enterprise-client`'s `redirectUris`/`webOrigins`, plus the two realm-config corrections under "Realm-config contract with QE" below. **Encountered live in step 6:** `KeycloakRealmImport` is *create-only against an empty realm slot* — even deleting + recreating the CR no-ops if the realm still exists in Keycloak (the import Job's strategy is `IGNORE_EXISTING`, the CRD has no `strategy` field). To actually re-import: `kcadm.sh delete realms/<name>` first, *then* delete + recreate the CR (or `oc delete application keycloak` for a full stack reset). Documented in CLAUDE.md gotchas; recovery procedure is what `scripts/bootstrap.sh` + the postmortem doc walk through. On cold deploys (no existing realm), the new YAML imports cleanly on first try.
+
+- **Realm-config contract with QE — two non-obvious requirements (both surfaced during step 6 debugging).** QE's access-token decoder reads `roles` strictly at the JWT root, and accepts only the six PascalCase role names (`SuperAdmin`, `Admin`, `Architect`, `DataEngineer`, `Analyst`, `Billing`). The realm import must therefore: (a) declare every protocol mapper that emits roles with `claim.name: "roles"` — **not** `resource_access.${client_id}.roles` (the Keycloak default for client-role mappers; widely shown in Keycloak docs); (b) name client roles using the exact PascalCase strings above, and reference them with the same casing in every user's `clientRoles:` block. Getting (a) wrong produces an infinite redirect loop (`CouldNotDecodeClaim` from QE's decoder); getting (b) wrong produces silent "logged in but every action denied" (decoder logs a WARN, returns empty roles). See `docs/OIDC_REDIRECT_LOOP_POSTMORTEM.md` for the full diagnostic + ADFS-equivalent claim rules; the postmortem is also the artifact we share with customers hitting either bug.
+
+- **Bearer-token auth requires `provider.access-token-audience`.** QE's `AuthorizationProvider` short-circuits the bearer-token path with `"Bearer-token authentication is not configured (set provider.access-token-audience)"` unless an expected `aud` value is set — this is RFC 8725 §3.8 / RFC 9068 §4 audience binding. Set via JVM arg `-Dquine.auth.oidc.full.provider.access-token-audience=quine-enterprise-client` in QE values. The browser/session-cookie flow does NOT require this — only `Authorization: Bearer <jwt>` API access does. Easy to miss because the browser flow works fine without it.
 
 **What's added**
 - `scripts/create-cluster-ingress-ca-configmap.sh` — extracts `openshift-config-managed/default-ingress-cert` (the cluster's ingress-operator CA bundle, same source as `trust-crc-ca.sh`) and applies it as `cluster-ingress-ca` ConfigMap in `thatdot-openshift`. Idempotent; re-runs handle CA regeneration after `crc delete` + `crc start`. Called from `bootstrap.sh` BEFORE the root Application is seeded, so the ConfigMap exists when QE pods schedule.
 - `manifests/quine-enterprise/patches/build-truststore.yaml` — Kustomize patch adding the first init container. Image: `registry.access.redhat.com/ubi9/openjdk-21:latest` (has `keytool` + a clean cacerts). Awk-splits the `cluster-ingress-ca` PEM bundle (multi-cert), imports each cert into `/workspace/cacerts` via `keytool -importcert`. emptyDir-volume-shared with the main container.
 - `manifests/quine-enterprise/patches/wait-for-keycloak.yaml` — Kustomize patch adding the third init container. Image: `registry.access.redhat.com/ubi9/ubi:latest` (has `bash` + `curl`; `ubi9-minimal` lacks curl). `curl -fsS --cacert /injected-ca/ca-bundle.crt https://<route>/realms/quine-enterprise/.well-known/openid-configuration` loop with `sleep 5`.
-- `manifests/quine-enterprise/values.yaml` updates — `oidc.enabled: true` with explicit `provider.{locationUrl, authorizationUrl, tokenUrl}` + `loginPath: "auth"`; `client.existingSecret.name: quine-enterprise-oidc-credentials`; JVM args gain `-Djavax.net.ssl.trustStore=/opt/truststore/cacerts -Djavax.net.ssl.trustStorePassword=changeit -Djavax.net.ssl.trustStoreType=JKS`; new top-level `volumes:` (referencing the `cluster-ingress-ca` ConfigMap + an emptyDir `truststore`) and `volumeMounts:` (the main container reads the JKS at `/opt/truststore`).
+- `manifests/quine-enterprise/values.yaml` updates — `oidc.enabled: true` with explicit `provider.{locationUrl, authorizationUrl, tokenUrl}` + `loginPath: "auth"`; `client.existingSecret.name: quine-enterprise-oidc-credentials`; JVM args gain `-Djavax.net.ssl.trustStore=/opt/truststore/cacerts -Djavax.net.ssl.trustStorePassword=changeit -Djavax.net.ssl.trustStoreType=JKS`, the three `quine.webserver-advertise.{address,port,use-tls}` knobs (so QE's OIDC `redirect_uri` is `https://...:443/...` instead of pod-local `http://...:8080/...`), and `-Dquine.auth.oidc.full.provider.access-token-audience=quine-enterprise-client` (required for any bearer-token API call — see Gotchas). New top-level `volumes:` (referencing the `cluster-ingress-ca` ConfigMap + an emptyDir `truststore`) and `volumeMounts:` (the main container reads the JKS at `/opt/truststore`).
 - `manifests/quine-enterprise/kustomization.yaml` updates — `patches:` now lists three patches (build-truststore → wait-for-cassandra → wait-for-keycloak; that's the init-container execution order). The `cluster-ingress-ca` ConfigMap is intentionally NOT in `resources:` — its content is cluster state extracted by `bootstrap.sh`, not git state.
-- `manifests/keycloak/keycloak-realm-import.yaml` updates — `quine-enterprise-client.redirectUris: ["https://quine-enterprise-thatdot-openshift.apps-crc.testing/*"]` and `.webOrigins: ["https://quine-enterprise-thatdot-openshift.apps-crc.testing"]`.
+- `manifests/keycloak/keycloak-realm-import.yaml` updates — three changes total:
+  - `quine-enterprise-client.redirectUris` carries BOTH `https://quine-enterprise-thatdot-openshift.apps-crc.testing/*` AND `https://quine-enterprise-thatdot-openshift.apps-crc.testing:443/*` (QE 1.10.6 emits `:443` explicitly even though it's the HTTPS default port; Keycloak's path-wildcard validation is literal-string and rejects the bare-host form against the `:443` callback). `webOrigins` carries both equivalents.
+  - Every protocol mapper that emits roles uses `claim.name: "roles"` (top-level) — initial implementation used `resource_access.${client_id}.roles` (Keycloak's default), which produced the infinite-redirect-loop bug now captured in the postmortem.
+  - All six client roles named in exact PascalCase (`SuperAdmin`, `Admin`, `Architect`, `DataEngineer`, `Analyst`, `Billing`); every user's `clientRoles:` block references the matching name. Initial implementation used lowercase, which silently discarded all role values in QE's decoder — see Gotchas + postmortem doc.
 - `scripts/create-qe-oidc-client-secret.sh` — idempotent; queries Keycloak via `kcadm.sh` to extract the client secret, creates the K8s Secret with both `clientSecret`/`clientId` and `client-secret`/`client-id` keys (hedge against chart key-name conventions until verified empirically).
 - `scripts/bootstrap.sh` updates — after seeding the root Application, polls `oc get keycloakrealmimport quine-enterprise -o jsonpath='{.status.conditions[?(@.type=="Done")].status}'` until `True` (15-min timeout, 10-s poll interval), then calls `create-qe-oidc-client-secret.sh`.
 
@@ -744,6 +751,8 @@ Step 6 is mostly additive against an already-running cluster, but the realm-impo
 - **Volume sharing between init and main containers.** The truststore JKS lives in an `emptyDir` volume defined at the pod level. The init container writes; the main container reads. Both reference the volume by name (`truststore`).
 - **Chart's expected Secret key names.** Prior-art Helm values references `existingSecret.name` but doesn't document which keys the chart reads from it. We populate four key-name variants in the Secret (`clientId`/`clientSecret`/`client-id`/`client-secret`) — once verified empirically which the chart uses, the others can be dropped.
 - **CRC apps domain hardcoded.** Three places carry `keycloak-thatdot-openshift.apps-crc.testing` / `quine-enterprise-thatdot-openshift.apps-crc.testing`: the Keycloak CR's hostname, the realm-import's redirectUris, and the wait-for-keycloak probe URL. Porting to a production cluster swaps `apps-crc.testing` for that cluster's `*.apps.<cluster>.<domain>` in all three.
+- **Two realm-config bugs were authored and debugged during step 6 — both worth knowing before iterating on the realm.** See the "Realm-config contract with QE" architectural decision above and `docs/OIDC_REDIRECT_LOOP_POSTMORTEM.md` for the full diagnostic procedure (this is also the artifact we share with customers hitting either symptom). Short version: (a) the `roles` protocol mapper must use `claim.name: "roles"`, not `resource_access.${client_id}.roles` — wrong → infinite redirect loop with `CouldNotDecodeClaim` in `/me`'s 401 body; (b) role names must be exact PascalCase — wrong → silent "logged in but every permission denied", with QE pod logs showing `WARN ... Discarding unknown role name: <value>`. Both are realm-config errors; both can be diagnosed by inspecting `/api/v2/auth/me`'s response body in DevTools.
+- **`provider.access-token-audience` is required for the bearer-token path.** RFC 8725 / RFC 9068 audience-binding compliance: QE refuses bearer tokens unless an expected `aud` is configured. Set via `-Dquine.auth.oidc.full.provider.access-token-audience=quine-enterprise-client` in `extraJdkArgs` — the same string the realm's tokens carry in `aud`. The browser/session-cookie flow does not need this; only programmatic `Authorization: Bearer <jwt>` calls do. Easy to miss because the browser tests pass without it.
 
 **Verification**
 
@@ -764,10 +773,12 @@ oc logs -n thatdot-openshift -l app.kubernetes.io/name=quine-enterprise --tail=2
 # Browser test — interactive OIDC flow
 ROUTE=$(oc get route quine-enterprise -n thatdot-openshift -o jsonpath='{.spec.host}')
 open "https://$ROUTE"
-# Expect: redirected to Keycloak login. Log in as admin1 / placeholder123,
+# Expect: redirected to Keycloak login. Log in as superadmin1 / placeholder123,
 # reset password on first login, get redirected back to QE landing page.
-# Confirm: roles visible in QE UI; admin endpoints accessible.
-# Log out; log in as analyst1; confirm restricted view (no admin endpoints).
+# Confirm: /api/v2/auth/me returns 200 with roles: ["SuperAdmin"] and
+# permissions: [...34 entries].
+# Log out; log in as analyst1; /api/v2/auth/me now returns roles: ["Analyst"]
+# with permissions: [...7 entries] — role isolation working.
 
 # Bearer-token test — service-account flow against QE API
 # (uses the qe-cli-admin client + secret from Keycloak)
@@ -783,8 +794,13 @@ CLI_SECRET=$(oc exec -n thatdot-openshift "$KC_POD" -- env ADMIN_PW="$ADMIN_PW" 
 TOKEN=$(curl -sk -d "client_id=qe-cli-admin" -d "client_secret=$CLI_SECRET" \
     -d "grant_type=client_credentials" \
     "https://$KEYCLOAK_ROUTE/realms/quine-enterprise/protocol/openid-connect/token" | jq -r .access_token)
-curl -sk -H "Authorization: Bearer $TOKEN" "https://$ROUTE/api/v2/admin/standing-queries"
-# Expect: 200 with JSON response (admin role authorizes admin endpoints).
+# Decode the JWT payload — confirm top-level `roles` claim with PascalCase value:
+echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{iss, aud, roles}'
+# Expect: roles: ["Admin"]  (NOT under resource_access.<client>.roles)
+curl -sk -H "Authorization: Bearer $TOKEN" "https://$ROUTE/api/v2/auth/me"
+# Expect: 200 with {"roles": ["Admin"], "permissions": [...8 entries]}.
+# Empty roles in the response → role-name casing bug; CouldNotDecodeClaim error
+# in body → claim.name nesting bug. See docs/OIDC_REDIRECT_LOOP_POSTMORTEM.md.
 ```
 
 **Done when** all four DoD bullets from the Jira ticket are satisfied:
@@ -815,9 +831,9 @@ Cross off as completed.
 - [x] **Step 3** — Cassandra added (cass-operator); QE persistor switched; persistence verified across pod restart
 - [x] **Step 4** — App-of-apps refactor (clean-slate teardown + 3-level platform/product split; bootstrap.sh shrunk to seed-only)
 - [x] **Step 5** — Keycloak deployed with `quine-enterprise` realm
-- [ ] **Step 6** — QE RBAC wired against Keycloak
+- [x] **Step 6** — QE RBAC wired against Keycloak
 
 ### Wrap-up
-- [ ] README reads as a complete walk-through for a fresh engineer
-- [ ] `IMPLEMENTATION_PLAN.md` reviewed and reflects what was actually done (or call out divergences)
-- [ ] Jira QU-2539 closed; sub-issues closed or rolled forward
+- [x] README reads as a complete walk-through for a fresh engineer
+- [x] `IMPLEMENTATION_PLAN.md` reviewed and reflects what was actually done (or call out divergences)
+- [ ] Jira QU-2539 closed; sub-issues closed or rolled forward *(closes on PR merge)*
