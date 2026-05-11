@@ -78,9 +78,21 @@ Six interactive users, one per role. All have initial password `placeholder123` 
 ### Shell helpers — drop in `~/.zshrc.local`
 
 ```bash
-# Force a sync immediately (resets ArgoCD's retry-backoff)
+# Force a sync immediately (resets ArgoCD's retry-backoff). With sync:{} (no
+# explicit revision), ArgoCD resolves to whatever spec.source.targetRevision
+# points at — the branch tip. Avoid `revision: "HEAD"` here; ArgoCD treats
+# the literal string "HEAD" inconsistently and can sync to a stale commit.
 argo-sync() { oc patch application "${1:?app}" -n openshift-gitops --type=merge \
-  -p '{"operation":{"sync":{"revision":"HEAD"},"initiatedBy":{"username":"'"$(whoami)"'"}}}'; }
+  -p '{"operation":{"sync":{},"initiatedBy":{"username":"'"$(whoami)"'"}}}'; }
+
+# Force a sync to the exact commit you have checked out locally. Use when
+# `argo-sync` syncs to an older commit than your `git rev-parse HEAD` (e.g.,
+# repo-server git cache is stale, or targetRevision resolves unexpectedly).
+argo-sync-here() {
+  local rev=$(git rev-parse HEAD)
+  oc patch application "${1:?app}" -n openshift-gitops --type=merge \
+    -p "{\"operation\":{\"sync\":{\"revision\":\"$rev\"},\"initiatedBy\":{\"username\":\"$(whoami)\"}}}"
+}
 
 # Cancel a stuck sync ("operationState.phase: Running" forever)
 argo-abort() { oc patch application "${1:?app}" -n openshift-gitops --type=merge -p '{"operation":null}'; }
@@ -89,7 +101,10 @@ argo-abort() { oc patch application "${1:?app}" -n openshift-gitops --type=merge
 argo-status() { oc get application -n openshift-gitops "$@"; }
 ```
 
-Note: `argocd.argoproj.io/refresh=hard` only re-pulls manifests — it does NOT force a sync and does NOT reset retry-backoff. Use `argo-sync` for that.
+Notes:
+
+- `argocd.argoproj.io/refresh=hard` only re-pulls manifests — it does NOT force a sync and does NOT reset retry-backoff. Use `argo-sync` for that.
+- After `argo-sync`, verify the sync targeted the commit you expected: `oc get application <app> -n openshift-gitops -o jsonpath='{.status.operationState.syncResult.revision}{"\n"}'`. If it's not your latest commit, fall back to `argo-sync-here`.
 
 ### Edit the Keycloak realm
 
@@ -108,6 +123,17 @@ Watch the hooks:
 
 ```bash
 oc get jobs -n thatdot-openshift -w    # realm-reset (PreSync) then pin-client-secret (PostSync)
+```
+
+If you don't see `realm-reset` and `pin-client-secret` appear within ~30s, ArgoCD may have synced to an older commit (repo-server caches git state and sometimes lags). Verify and force-correct:
+
+```bash
+# What commit did ArgoCD's last sync actually target?
+oc get application keycloak -n openshift-gitops -o jsonpath='{.status.operationState.syncResult.revision}{"\n"}'
+git rev-parse HEAD    # should match — if not, the next step
+
+# Force a sync to the exact commit you have locally
+argo-sync-here keycloak
 ```
 
 ### Mint a bearer token for the API
