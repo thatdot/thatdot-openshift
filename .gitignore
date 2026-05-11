@@ -28,6 +28,7 @@ kubeconfig
 kubeconfig.*
 pull-secret
 pull-secret.*
+!create-qe-oidc-credentials-secret.sh
 .crc/
 
 # ============================================================
