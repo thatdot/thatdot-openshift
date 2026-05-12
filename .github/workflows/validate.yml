@@ -1,0 +1,58 @@
+name: validate
+
+# Pre-merge validation: yamllint, kustomize rendering, kubeconform, shellcheck.
+# Calls the same script developers can run locally — see ci/validate.sh and
+# the README "Optional, for running CI checks locally" line in Prerequisites.
+#
+# Tool versions are pinned via env vars below — bump them as needed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  KUSTOMIZE_VERSION: "5.8.1"
+  KUBECONFORM_VERSION: "0.7.0"
+  HELM_VERSION: "v3.16.0"
+
+jobs:
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: pip install --quiet yamllint
+
+      - name: Install kustomize
+        # Direct download from a pinned release. (The kubernetes-sigs
+        # `install_kustomize.sh` script does its own discovery and is flaky
+        # under GitHub API rate limits — we pin instead.) The release tag is
+        # `kustomize/v<version>`, so the slash is URL-encoded as `%2F`.
+        run: |
+          curl -sfL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kustomize
+          kustomize version
+
+      # helm is required for kustomize's `--enable-helm` flag (renders the
+      # helmCharts: block in manifests/quine-enterprise/).
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install kubeconform
+        run: |
+          curl -sfL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      # shellcheck is pre-installed on ubuntu-latest runners.
+
+      - name: Run validation
+        run: ./ci/validate.sh

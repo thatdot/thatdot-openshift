@@ -1,0 +1,27 @@
+# yamllint config — relaxed preset, with rules tuned for this repo.
+#
+# We disable line-length because Kustomize patches, Helm values, and operator
+# CRs commonly carry long URLs or composite identifiers. We disable
+# `truthy.check-keys` because Kubernetes manifests use `on:` (workflow trigger)
+# and similar field names that yamllint would otherwise flag.
+#
+# What still fires (and should):
+#   - syntax errors
+#   - duplicate keys
+#   - inconsistent indentation
+#   - trailing whitespace
+#   - missing document start where required by surrounding context
+
+extends: relaxed
+
+rules:
+  line-length: disable
+  truthy:
+    check-keys: false
+
+ignore: |
+  charts/
+  **/charts/
+  tmp/
+  temp/
+  .pre-commit-cache/
