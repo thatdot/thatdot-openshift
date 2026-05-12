@@ -83,11 +83,11 @@ ArgoCD's built-in health checks know about Deployments, StatefulSets, Pods, Serv
 
 `bootstrap/argocd-customizations.yaml` registers three custom checks:
 
-| Kind | Healthy condition |
-|---|---|
+| Kind                  | Healthy condition                                                               |
+| --------------------- | ------------------------------------------------------------------------------- |
 | `CassandraDatacenter` | `cassandraOperatorProgress == "Ready"` AND `conditions[Ready].status == "True"` |
-| `Keycloak` | `conditions[Ready].status == "True"` AND `HasErrors == False` |
-| `KeycloakRealmImport` | `conditions[Done].status == "True"` |
+| `Keycloak`            | `conditions[Ready].status == "True"` AND `HasErrors == False`                   |
+| `KeycloakRealmImport` | `conditions[Done].status == "True"`                                             |
 
 The KeycloakRealmImport check is what gates the timing of the PostSync `pin-client-secret` Job — it only fires once the realm import is genuinely done.
 
@@ -248,7 +248,3 @@ Not in scope for v1. Production needs:
 ### Authentication for cluster operations
 
 `bootstrap.sh` assumes the operator is logged in as `kubeadmin` (cluster-admin). Production uses RBAC + identity-provider-backed user accounts; `kubeadmin` is typically disabled. The bootstrap path would need to be re-shaped for a least-privilege operator role.
-
-### Novelty and Kafka
-
-Deliberately out of v1 scope. The `enterprise-oauth-reference` repo is the reference for adding either.
